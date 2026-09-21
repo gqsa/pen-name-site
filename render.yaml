@@ -1,0 +1,19 @@
+# Render deployment configuration for our backend practice app
+# This file tells Render.com how to build and run our Node.js application.
+
+services:
+  - type: web
+    name: my-website-backend
+    env: node
+    # Build command: install all npm dependencies listed in package.json
+    buildCommand: npm install
+    # Start command: run the server (Render sets PORT automatically)
+    startCommand: node server.js
+    # Health check: Render will ping this URL to verify the app is running
+    healthCheckPath: /
+    # Environment variables for production deployment
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SESSION_SECRET
+        generateValue: true  # Render creates a random secret automatically

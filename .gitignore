@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Local database file (don't commit this)
+database.db
+
+# npm cache
+.npm-cache/
+npm-cache/
+
+# DSH internal files
+.dsh-file-claim.audit.jsonl
+
+# Environment variables (keep secrets out of git)
+.env

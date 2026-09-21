@@ -1,0 +1,15 @@
+{
+  "name": "my-website",
+  "version": "1.0.0",
+  "description": "Simple website with user accounts and progress tracking",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "express": "^4.21.0",
+    "express-session": "^1.19.0"
+  }
+}
