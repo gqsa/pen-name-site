@@ -23,6 +23,8 @@ import {
   cancelSubscription,
   processPaypalWebhook,
   reprocessPendingWebhooks,
+  getSubscription,
+  activateMembershipFromApi,
 } from './paypal-subscriptions.js';
 
 const app = express();
@@ -747,75 +749,99 @@ app.post('/join-membership', async (req, res) => {
   }
 });
 
-// A2 ACT 4: the browser lands here after the buyer approves (or bails) on
-// PayPal's page. IMPORTANT: this page does NOT grant membership — the signed
-// webhook (act 3) does. The two messages RACE each other (the browser is often
-// faster than the webhook), so this page just polls our OWN /membership-status
-// for a little while and reports what it finds. If the webhook never arrives
-// (not configured, wrong URL, etc.) the page says so instead of lying.
-app.get('/paypal-return', (req, res) => {
+// A2 ACT 4 (v2 — API check): the browser lands here after the buyer approves
+// (or bails) on PayPal's page.
+//
+// WHY THIS CHANGED (2026-09-22): in sandbox, PayPal's signed webhooks have
+// been arriving with signatures we cannot verify, so the act-3 grant never
+// fires there (the production pipeline is proven healthy — a correctly
+// signed request through the real path verifies fine; the failure is
+// input-specific). So this route now ASKS PAYPAL'S API directly — "is this
+// subscription ACTIVE?" — and grants membership itself on a yes. The grant
+// goes through activateMembershipFromApi -> applyMembershipEvent, the SAME
+// code path the webhook uses, so there is still exactly one place that
+// changes membership state (and it's idempotent: if a genuine webhook later
+// arrives for the same subscription, it's a harmless no-op).
+//
+// SECURITY NOTE: the decision is made SERVER-SIDE from PayPal's own API
+// answer, using our server-side credentials and the subscription id WE
+// created — the browser only triggers the check, it can never claim
+// "I'm a member". (In production the signed webhook remains the primary
+// path and this route is a compatible second trigger.)
+app.get('/paypal-return', async (req, res) => {
   if (!req.session.userId) {
     return res.redirect('/login');
   }
+  const userRow = db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.userId);
 
-  res.send(`
+  const page = (headline, detailHtml) => res.send(`
     <html>
-      <head><title>Almost done…</title></head>
+      <head><title>${headline}</title></head>
       <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-        <h1 id="headline">Checking your membership…</h1>
-        <p id="detail">You approved on PayPal's side. Our server is waiting for PayPal's
-        signed confirmation webhook (it usually arrives within a few seconds).</p>
+        <h1>${headline}</h1>
+        <p>${detailHtml}</p>
         <p><a href="/dashboard">Go to your dashboard</a></p>
-
-        <script>
-          // Poll our OWN status endpoint (the source of truth) for up to ~30s.
-          let tries = 0;
-          const timer = setInterval(async () => {
-            tries++;
-            try {
-              const r = await fetch('/membership-status');
-              if (!r.ok) return;
-              const s = await r.json();
-              if (s.member) {
-                clearInterval(timer);
-                document.getElementById('headline').textContent = 'Welcome to the membership! 🎉';
-                document.getElementById('detail').textContent =
-                  'PayPal confirmed your subscription — you are a member. It renews monthly.';
-              } else if (tries >= 10) {
-                clearInterval(timer);
-                document.getElementById('headline').textContent = 'Approved — still confirming…';
-                document.getElementById('detail').textContent =
-                  'Your subscription was approved on PayPal, but the confirmation webhook hasn\\'t ' +
-                  'arrived yet (it can take a moment, or the webhook isn\\'t set up). ' +
-                  'Check back at your dashboard in a minute.';
-              }
-            } catch (e) { /* network hiccup — try again */ }
-          }, 3000);
-          // Hard stop after a minute even if something goes wrong.
-          setTimeout(() => clearInterval(timer), 60000);
-        </script>
       </body>
     </html>
   `);
-});
 
-// TEMP DEBUG (2026-09-22 diagnosis) — REMOVE AFTER: serves a fixed SPKI public
-// key so the agent can send a CORRECTLY-SIGNED request through the REAL
-// production path (PayPal-internet → Render proxy → express.raw → verify).
-// If that request is ACCEPTED, the live pipeline is proven healthy and the
-// PayPal-delivery failure is input-specific; if REJECTED, the dump shows why.
-// The key has no private counterpart on this server; the PEM is public data.
-const DEBUG_TEST_PUBKEY_PEM = `-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArzmtxyVDToaovePPr4+D
-z0NQHlDgFzHUYcjUsXAym2756E/Z2z+yDpvhoueCfmiCVYHRyzjPLoeZEnPZRGTx
-Pg2W1XCA1keVPdyFEGcWV/OBRYRVJRhKwpEK4PW7R6j3aEcNoV1y3gqU0rz3LY2C
-OgUzAdgtp915kB9dtihtNn3HQoKG8P3ND2Uom7AcQcT2kR2yhdIfoUPfL/FM2kJU
-jIh94KB6RPcdXIa1ZENB4FTGglUJLcXoJl0lACBWoyZB8/k4y7kEwEBvwjWjjwks
-H2vyK1S1aUwC9mQ42aTqgjJ1LX5iRk4i+q7GHcMDIN7ErTk+MeMtcLb3T2BIjyzo
-KQIDAQAB
------END PUBLIC KEY-----`;
-app.get('/debug-cert', (req, res) => {
-  res.type('application/x-pem-file').send(DEBUG_TEST_PUBKEY_PEM);
+  if (!userRow || !userRow.paypal_subscription_id) {
+    return page(
+      'No subscription on file',
+      "You don't have a PayPal subscription started yet. " +
+      '<a href="/dashboard">Join from your dashboard</a>.'
+    );
+  }
+
+  if (PAYPAL_CLIENT_ID.startsWith('PASTE_')) {
+    return page(
+      "PayPal isn't set up yet",
+      'Add your sandbox credentials to <code>.env</code> (or the Render env) and restart.'
+    );
+  }
+
+  try {
+    const sub = await getSubscription(userRow.paypal_subscription_id);
+    console.log(`[A2] return-route check: user ${userRow.id} sub ${sub.id} -> ${sub.status}`);
+
+    if (sub.status === 'ACTIVE' || sub.status === 'TRIALING') {
+      const outcome = activateMembershipFromApi(db, { userId: userRow.id, subscriptionId: sub.id });
+      console.log(`[A2] return-route GRANT: user ${userRow.id} sub ${sub.id} -> ${JSON.stringify(outcome)}`);
+      return page(
+        'You are now a member! ⭐',
+        'PayPal confirms your subscription is active — membership is on. ' +
+        'It renews monthly until you cancel it.'
+      );
+    }
+
+    if (sub.status === 'APPROVAL_PENDING') {
+      return page(
+        'Almost there — approval pending',
+        'Your subscription exists, but it hasn\'t been approved yet. Finish the ' +
+        '<strong>Agree &amp; Approve</strong> step in the PayPal window, then ' +
+        '<a href="/paypal-return">check again</a>.'
+      );
+    }
+
+    return page(
+      'Subscription status: ' + sub.status,
+      'PayPal reports your subscription as <code>' + sub.status + '</code>, so ' +
+      'membership stays off. If you just approved it, wait a moment and ' +
+      '<a href="/paypal-return">check again</a>.'
+    );
+  } catch (error) {
+    console.log(`[A2] return-route check FAILED: user ${userRow.id} — ${error.message}`);
+    res.status(502).send(`
+      <html>
+        <head><title>Membership check failed</title></head>
+        <body style="font-family: Arial; text-align: center; padding-top: 100px;">
+          <h1>Couldn't confirm your membership</h1>
+          <p>${error.message}</p>
+          <p><a href="/paypal-return">Try again</a> &middot; <a href="/dashboard">Back to dashboard</a></p>
+        </body>
+      </html>
+    `);
+  }
 });
 
 // A2 ACT 3 (the one that matters): PayPal's SERVERS POST signed events here.

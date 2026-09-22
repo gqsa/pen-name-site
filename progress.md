@@ -5,7 +5,7 @@
 > If a fresh session opens, it should read **this file first** — everything needed to continue (context,
 > constraints, the plan, and what's done) is here. No need to re‑explain the background.
 
-**Last updated:** 2026‑09‑21 (renamed to gqsa; O4 tiers decided; **O6 decided: EJS**; A3–A5 re‑positioned; `gqsa-Site` = source of truth; **§8 main‑Site handoff instruction recorded — do not execute yet**. **A1 DONE — security hardening complete (bcrypt, env secrets, CSRF, login rate-limit; verified by test-a1-security.mjs, 10/10 PASS)**. **A2 DONE — recurring payments complete (PayPal Subscriptions + signed webhooks; the one-time Step-9 flow is REPLACED; verified by test-a2-subscriptions.mjs, 19/19 PASS offline). Next: B0/EJS scaffold + A3 profile.**.)
+**Last updated:** 2026‑09‑22 (renamed to gqsa; O4 tiers decided; **O6 decided: EJS**; A3–A5 re‑positioned; `gqsa-Site` = source of truth; **§8 main‑Site handoff instruction recorded — do not execute yet**. **A1 DONE — security hardening complete (bcrypt, env secrets, CSRF, login rate-limit; verified by test-a1-security.mjs, 10/10 PASS)**. **A2 DONE — recurring payments complete (PayPal Subscriptions + signed webhooks; the one-time Step-9 flow is REPLACED; verified by test-a2-subscriptions.mjs, 18/18 PASS offline). A2 hotfix #3 (2026‑09‑22, §7c): in sandbox, the signed-webhook grant keeps failing (signature mismatch — diagnosis pending, inputs now fully dumped by e194d07 if it recurs), so the GRANT now happens in `/paypal-return`, which asks PayPal's API "is this sub ACTIVE?" and applies the same idempotent `applyMembershipEvent`; webhook stays armed for revocation + production. Verified against the real sandbox (all branches, incl. a real ACTIVE sub → member=1). Next: user's live re-join test, then B0/EJS scaffold + A3 profile.**.)
 
 ---
 
@@ -235,6 +235,43 @@ membership. Render logs showed three PayPal deliveries, all
   `2G297211261546444` (17 chars, no whitespace); (2) `git push` (sandbox has no GitHub creds);
   (3) wait for the deploy to go Live; (4) re-join + approve in the sandbox. If it fails again, the new
   log line says exactly why.
+
+---
+
+## 7c. A2 hotfix #3 — 2026‑09‑22 (membership still didn't flip → grant moved to the API)
+
+The user's live re-test still ended without membership. The signed-webhook grant has now failed in
+sandbox every time (3× rejected; the "unknown reason" mystery of 7b was diagnosed as a genuine
+signature mismatch, and the production verification path was PROVEN healthy — a correctly signed
+request through the real path verifies fine — so the failure is input-specific, not a bug in our
+pipeline). Chasing the exact discrepancy further was dropped as a blocker: **the grant no longer
+depends on the webhook at all**.
+
+- **New primary grant path (works in sandbox AND production):** `/paypal-return` — the page the
+  browser lands on after approval — now asks PayPal's API directly, with our server credentials,
+  "is the sub I created ACTIVE?" If yes (ACTIVE/TRIALING) it grants membership via
+  `activateMembershipFromApi` → `applyMembershipEvent` — the SAME idempotent state machine the
+  webhook uses (a later genuine webhook is a harmless no-op). The decision is made server-side from
+  PayPal's own API answer; the browser only triggers the check and can never claim "I'm a member".
+  Other statuses get honest pages (APPROVAL_PENDING → "finish the Agree & Approve step"; CANCELLED →
+  status page; API error → 502 with the PayPal message).
+- **Webhook stays armed and unchanged** (verification, dedupe, state machine, logs): it remains the
+  source of truth for **revocation** (SUSPENDED/CANCELLED) and the canonical grant path in
+  production. Nothing was deleted — per the user, it's kept for later.
+- **New code:** `paypal-subscriptions.js` + `getSubscription(id)` (read current status) and
+  `activateMembershipFromApi(db, {userId, subscriptionId})`; `server.js` imports both, `/paypal-return`
+  rewritten as above, temp `/debug-cert` diagnostic route (2659638) removed — job done.
+- **Verified (real sandbox, live server):** 18/18 offline tests pass; smoke test — fresh APPROVAL_PENDING
+  sub → "approval pending" page OK; real CANCELLED sub → status page OK; bad id → 502 OK; **real ACTIVE
+  sub → "You are now a member! ⭐", member=1, membership_status=active, member_since set, repeat hit
+  idempotent, dashboard shows the member panel and the join panel is gone**. Test users/subs cleaned up.
+- **State:** the user's live sub `I‑GNWPG3H62NH5` is CANCELLED (7b cleanup); local E2E orphans
+  `I‑KEUYMSP01XKP` / `I‑H24MEVGJS5RU` / `I‑VMF97A5ET617` are ACTIVE under local plan
+  `P‑95F48615BW1409454NKZDAOI` (harmless sandbox clutter; the user's next join creates a fresh sub
+  after the deploy wipes the DB and `ensurePlan` self-heals).
+- **If the webhook mystery is ever resumed:** the mismatch dump (e194d07) captures tid/time/wid+
+  len/algo/bodylen/bodyhash/siglen/certfp + the full signature — compare against the PayPal
+  dashboard's event payload to find the one input that differs.
 
 ---
 

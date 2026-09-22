@@ -216,6 +216,35 @@ export async function cancelSubscription(subscriptionId) {
   }
 }
 
+// A2 fallback (sandbox webhook workaround): fetch a subscription's CURRENT
+// state directly from PayPal's API. The browser's return route calls this
+// after the buyer approves and acts on the answer — no signed webhook
+// required. Read-only and idempotent; the signed webhook stays the source of
+// truth for revocation and remains fully armed.
+export async function getSubscription(subscriptionId) {
+  const token = await getPaypalToken();
+  const res = await fetch(`${PAYPAL_BASE_URL}/v1/billing/subscriptions/${subscriptionId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.id) {
+    throw new Error(`status failed: ${data.message || data.debug_id || 'HTTP ' + res.status}`);
+  }
+  return data;
+}
+
+// The return route's grant: PayPal's API said the subscription is ACTIVE, so
+// apply exactly the same state change an ACTIVATED webhook event would.
+// Synthesizing the event keeps ONE code path for every membership change
+// (applyMembershipEvent is idempotent, so a later genuine webhook for the
+// same subscription is a harmless no-op).
+export function activateMembershipFromApi(db, { userId, subscriptionId }) {
+  return applyMembershipEvent(db, {
+    event_type: 'BILLING.SUBSCRIPTION.ACTIVATED',
+    resource: { id: subscriptionId, custom_id: String(userId) },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // INBOUND: PayPal -> our server (webhooks)
 // ---------------------------------------------------------------------------
