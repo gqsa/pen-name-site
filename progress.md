@@ -5,7 +5,7 @@
 > If a fresh session opens, it should read **this file first** — everything needed to continue (context,
 > constraints, the plan, and what's done) is here. No need to re‑explain the background.
 
-**Last updated:** 2026‑09‑22 (renamed to gqsa; O4 tiers decided; **O6 decided: EJS**; A3–A5 re‑positioned; `gqsa-Site` = source of truth; **§8 main‑Site handoff instruction recorded — do not execute yet**. **A1 DONE — security hardening complete (bcrypt, env secrets, CSRF, login rate-limit; verified by test-a1-security.mjs, 10/10 PASS)**. **A2 DONE — recurring payments complete (PayPal Subscriptions + signed webhooks; the one-time Step-9 flow is REPLACED; verified by test-a2-subscriptions.mjs, 18/18 PASS offline). A2 hotfix #3 (2026‑09‑22, §7c): in sandbox, the signed-webhook grant keeps failing (signature mismatch — diagnosis pending, inputs now fully dumped by e194d07 if it recurs), so the GRANT now happens in `/paypal-return`, which asks PayPal's API "is this sub ACTIVE?" and applies the same idempotent `applyMembershipEvent`; webhook stays armed for revocation + production. Verified against the real sandbox (all branches, incl. a real ACTIVE sub → member=1). Next: user's live re-join test, then B0/EJS scaffold + A3 profile.**.)
+**Last updated:** 2026‑09‑22 (renamed to gqsa; O4 tiers decided; **O6 decided: EJS**; A3–A5 re‑positioned; `gqsa-Site` = source of truth; **§8 main‑Site handoff instruction recorded — do not execute yet**. **A1 DONE — security hardening complete (bcrypt, env secrets, CSRF, login rate-limit; verified by test-a1-security.mjs, 10/10 PASS)**. **A2 DONE — recurring payments complete (PayPal Subscriptions + signed webhooks; the one-time Step-9 flow is REPLACED; verified by test-a2-subscriptions.mjs, 18/18 PASS offline). A2 hotfix #3 (§7c): grant now happens in `/paypal-return`, which asks PayPal's API "is this sub ACTIVE?" and applies the same idempotent `applyMembershipEvent` (sandbox webhooks keep failing signature verification; webhook stays armed for revocation + production). VERIFIED LIVE: user is Member ⭐. A2 hotfix #4 (§7d): the Cancel button was a no-op (wrong API — `DELETE` 404'd without cancelling, so a charged sub couldn't be cancelled); fixed to `POST …/cancel` (204 → CANCELLED) + membership flipped off locally + de-scared error page; VERIFIED end-to-end. NEXT: user clicks Cancel once to genuinely cancel their live sub, then B0/EJS scaffold + A3 profile.**.)
 
 ---
 
@@ -272,6 +272,39 @@ depends on the webhook at all**.
 - **If the webhook mystery is ever resumed:** the mismatch dump (e194d07) captures tid/time/wid+
   len/algo/bodylen/bodyhash/siglen/certfp + the full signature — compare against the PayPal
   dashboard's event payload to find the one input that differs.
+
+---
+
+## 7d. A2 hotfix #4 — 2026‑09‑22 (cancel button was a no-op: wrong API call)
+
+User got Member ⭐ (the 7c grant path works live), but the **Cancel membership** button returned
+`Couldn't cancel on PayPal's side — cancel failed: HTTP 404`. That is a real bug (a charged
+subscription that can't be cancelled), and it was confirmed:
+
+- **Root cause:** `cancelSubscription` used `DELETE /v1/billing/subscriptions/{id}`. Verified
+  against the live sandbox: that returns **404 and does NOT cancel** — the sub stays **ACTIVE**
+  (still billing). The correct call is **`POST /v1/billing/subscriptions/{id}/cancel`**, which
+  returns **204** and sets the sub to **CANCELLED** (proven: `I‑H24MEVGJS5RU` ACTIVE→CANCELLED).
+  It also needs `Content-Type: application/json` (a bare POST is 415 UNSUPPORTED_MEDIA_TYPE).
+- **Fix (this commit):**
+  1. `cancelSubscription` → `POST …/cancel` + JSON content-type (was `DELETE`, the 404 no-op).
+  2. New `cancelMembershipFromApi` (symmetric to `activateMembershipFromApi`): the cancel route now
+     flips membership **off locally** through the same idempotent `applyMembershipEvent` instead of
+     waiting for the (unreliable) CANCELLED webhook — so a successful cancel turns the user off
+     immediately and the dashboard returns to the free/join state.
+  3. Cancel route UX: success page now says "membership is now off, you won't be charged again";
+     the failure page now says **membership is still on**, shows the PayPal error, and points to
+     cancelling from the PayPal account as a fallback. Both paths log `[A2] cancel …`.
+- **Verified (live sandbox):** 18/18 offline tests pass; end-to-end smoke — real ACTIVE sub
+  `I‑VMF97A5ET617` → cancel route → **sub CANCELLED on PayPal + member=0/cancelled locally +
+  dashboard back to join panel**; error branch (bogus id) → 502 with "still on" and membership
+  correctly stays ON. Test user cleaned up.
+- **Live state:** the user's live subscription is **still ACTIVE and charging** (the 7c grant
+  created it; the broken cancel never cancelled it). After this deploy, the user clicks
+  **Cancel membership** once and it will genuinely cancel + turn off. (Or cancel from their PayPal
+  sandbox account — the next check will reflect it.)
+- **Env note:** `git` push on this box now uses `http.sslBackend=openssl` (set in repo config) —
+  the default schannel backend fails here with `SEC_E_NO_CREDENTIALS`.
 
 ---
 

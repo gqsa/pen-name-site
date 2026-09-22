@@ -25,6 +25,7 @@ import {
   reprocessPendingWebhooks,
   getSubscription,
   activateMembershipFromApi,
+  cancelMembershipFromApi,
 } from './paypal-subscriptions.js';
 
 const app = express();
@@ -897,10 +898,12 @@ app.get('/membership-status', (req, res) => {
   });
 });
 
-// A2: cancel — ask PayPal to cancel the subscription. We do NOT flip the user
-// off ourselves here: the CANCELLED webhook (or the buyer cancelling from
-// their own PayPal account) does that, keeping ONE code path for every state
-// change. We just report what we asked for.
+// A2: cancel — ask PayPal to cancel the subscription, and (once PayPal
+// confirms) flip the user off through the SAME state machine the webhook
+// uses. We no longer wait for the CANCELLED webhook to do the flipping
+// (it's unreliable in sandbox); a later genuine webhook is a harmless no-op
+// (applyMembershipEvent is idempotent). If PayPal's cancel fails, membership
+// stays ON and the page says so plainly, with a fallback path.
 app.post('/cancel-membership', async (req, res) => {
   const userRow = req.session.userId
     ? db.prepare("SELECT * FROM users WHERE id = ?").get(req.session.userId)
@@ -930,22 +933,34 @@ app.post('/cancel-membership', async (req, res) => {
 
   try {
     await cancelSubscription(userRow.paypal_subscription_id);
+    // PayPal confirmed the cancellation. Flip membership OFF NOW through the
+    // same state machine the webhook uses — don't wait for the (unreliable)
+    // CANCELLED webhook. A later genuine webhook is a harmless no-op.
+    const outcome = cancelMembershipFromApi(db, {
+      userId: userRow.id,
+      subscriptionId: userRow.paypal_subscription_id,
+    });
+    console.log(`[A2] cancel confirmed: user ${userRow.id} sub ${userRow.paypal_subscription_id} -> ${JSON.stringify(outcome)}`);
     res.send(`
       <html>
-        <head><title>Cancellation requested</title></head>
+        <head><title>Membership cancelled</title></head>
         <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-          <h1>Cancellation requested</h1>
-          <p>PayPal accepted the cancellation. Your membership switches off as soon
-          as the CANCELLED webhook arrives (usually within seconds).</p>
+          <h1>Membership cancelled</h1>
+          <p>PayPal confirmed the cancellation and your membership is now off.
+          You won't be charged again.</p>
           <p><a href="/dashboard">Back to dashboard</a></p>
         </body>
       </html>
     `);
   } catch (error) {
+    console.log(`[A2] cancel FAILED for user ${userRow.id}: ${error.message}`);
     res.status(502).send(`
       <html><body style="font-family: Arial; text-align: center; padding-top: 100px;">
         <h1>Couldn't cancel on PayPal's side</h1>
-        <p>${error.message}</p>
+        <p>PayPal didn't accept the cancellation, so <strong>your membership is
+        still on</strong>. Details: ${error.message}</p>
+        <p>You can also cancel from your PayPal account (Subscriptions), and your
+        membership will turn off the next time we check.</p>
         <p><a href="/dashboard">Back to dashboard</a></p>
       </body></html>
     `);

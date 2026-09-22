@@ -201,14 +201,28 @@ export async function createSubscription(db, { userId, username, email }) {
   return data;
 }
 
-// Cancel a user's subscription. The subscription stays visible in the buyer's
-// account until its paid period ends; PayPal then fires
-// BILLING.SUBSCRIPTION.CANCELLED, which flips our membership off.
+// Cancel a user's subscription.
+//
+// CORRECT ENDPOINT (verified against the live sandbox, 2026-09-22):
+//   POST /v1/billing/subscriptions/{id}/cancel   -> 204, sub becomes CANCELLED
+// The old `DELETE /v1/billing/subscriptions/{id}` returns 404 AND does NOT
+// cancel anything (the sub stays ACTIVE) — that is exactly the "cancel failed:
+// HTTP 404" the user hit, with their subscription still live and charging.
+// PayPal also demands a JSON content-type on this POST (a bare POST is 415).
+//
+// After this returns, the sub is CANCELLED on PayPal's side. We ALSO flip the
+// membership off locally (see /cancel-membership) instead of waiting for the
+// CANCELLED webhook — the sandbox webhook path is unreliable, and a later
+// genuine webhook is a harmless no-op (applyMembershipEvent is idempotent).
 export async function cancelSubscription(subscriptionId) {
   const token = await getPaypalToken();
-  const res = await fetch(`${PAYPAL_BASE_URL}/v1/billing/subscriptions/${subscriptionId}`, {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${token}` },
+  const res = await fetch(`${PAYPAL_BASE_URL}/v1/billing/subscriptions/${subscriptionId}/cancel`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({}),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -241,6 +255,17 @@ export async function getSubscription(subscriptionId) {
 export function activateMembershipFromApi(db, { userId, subscriptionId }) {
   return applyMembershipEvent(db, {
     event_type: 'BILLING.SUBSCRIPTION.ACTIVATED',
+    resource: { id: subscriptionId, custom_id: String(userId) },
+  });
+}
+
+// The cancel route's revoke: we just asked PayPal to cancel (and it
+// confirmed), so apply exactly the same state change a CANCELLED webhook
+// event would — without waiting for that webhook (unreliable in sandbox).
+// Idempotency holds: a later genuine CANCELLED webhook is a harmless no-op.
+export function cancelMembershipFromApi(db, { userId, subscriptionId }) {
+  return applyMembershipEvent(db, {
+    event_type: 'BILLING.SUBSCRIPTION.CANCELLED',
     resource: { id: subscriptionId, custom_id: String(userId) },
   });
 }
