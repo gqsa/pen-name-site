@@ -100,22 +100,46 @@ export async function ensureProduct(db) {
 // Ensure a billing plan exists and return its id.
 // (Verified against the spec: POST /v1/billing/plans requires
 //  `name`, `billing_cycles`, `payment_preferences`, `product_id`.)
+//
+// Self-healing: the plan id cached in paypal_meta is only good while the plan
+// is ACTIVE and actually recurring. PayPal silently defaults `total_cycles`
+// to 1 when it is omitted — that builds a ONE-SHOT plan (the subscription
+// expires right after the first payment; we hit this live: our first plan
+// had exactly that shape). `0` is the spec's "runs forever" value. If the
+// cached plan fails this check, we create a proper recurring one and retire
+// the old one, so no manual DB surgery is ever needed.
 export async function ensurePlan(db) {
   const existing = metaGet(db, 'plan_id');
-  if (existing) return existing;
+  if (existing) {
+    try {
+      const token = await getPaypalToken();
+      const res = await fetch(`${PAYPAL_BASE_URL}/v1/billing/plans/${existing}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const plan = await res.json();
+        const cycle = (plan.billing_cycles || [])[0] || {};
+        if (plan.status === 'ACTIVE' && Number(cycle.total_cycles) === 0) return existing;
+      }
+    } catch { /* network hiccup — fall through and (re)create below */ }
+  }
   const productId = await ensureProduct(db);
   const token = await getPaypalToken();
-  const res = await fetch(`${PAYPAL_BASE_URL}/v1/billing/plans`, {
+  const create = (name) => fetch(`${PAYPAL_BASE_URL}/v1/billing/plans`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify({
       product_id: productId,
-      name: SUBSCRIPTION_NAME,
+      name,
       billing_cycles: [
         {
           sequence: 1, // first (and only) cycle; REGULAR tenure = no trial
           tenure_type: 'REGULAR',
           frequency: { interval_unit: SUBSCRIPTION_PERIOD, interval_count: 1 },
+          // 0 = this cycle runs forever (spec: "Regular billing cycles can be
+          // executed infinite times (value of 0)"). Omitting it defaults to 1
+          // — a one-time charge. Never omit it.
+          total_cycles: 0,
           pricing_scheme: {
             fixed_price: { value: SUBSCRIPTION_PRICE, currency_code: SUBSCRIPTION_CURRENCY },
           },
@@ -125,9 +149,26 @@ export async function ensurePlan(db) {
       status: 'ACTIVE',
     }),
   });
-  const data = await res.json().catch(() => ({}));
+  let res = await create(SUBSCRIPTION_NAME);
+  let data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    // Some PayPal tenants reject a duplicate plan name under the same product
+    // (the retired one-shot plan is still listed there). Retry once, distinct.
+    res = await create(`${SUBSCRIPTION_NAME} (monthly)`);
+    data = await res.json().catch(() => ({}));
+  }
   if (!res.ok || !data.id) throw new Error(`plan failed: ${data.message || data.debug_id || 'HTTP ' + res.status}`);
   metaSet(db, 'plan_id', data.id);
+  if (existing && existing !== data.id) {
+    // Best-effort: retire the replaced plan so the dashboard isn't cluttered.
+    // (PayPal may refuse while it still has live subscriptions — non-fatal.)
+    try {
+      await fetch(`${PAYPAL_BASE_URL}/v1/billing/plans/${existing}/deactivate`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch { /* non-fatal */ }
+  }
   return data.id;
 }
 
@@ -187,6 +228,10 @@ const MEMBERSHIP_EVENTS = {
   'BILLING.SUBSCRIPTION.SUSPENDED': 'suspended', // payment failed; PayPal pauses billing
   'BILLING.SUBSCRIPTION.CANCELLED': 'cancelled', // buyer (or we) cancelled
   'BILLING.SUBSCRIPTION.REINSTATED': 'active', // suspended sub got paid and resumed
+  // The new Subscriptions API actually names the re-activation event
+  // RE-ACTIVATED (verified against the webhook event list PayPal offers) —
+  // this is the one that fires; REINSTATED above is kept as a legacy alias.
+  'BILLING.SUBSCRIPTION.RE-ACTIVATED': 'active', // suspended sub got paid and resumed (API's real name)
 };
 
 // Find the user a subscription event belongs to, via the two bridges we

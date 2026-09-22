@@ -181,6 +181,37 @@ These don't block planning, but they **will** change scope. Mark them when decid
 
 ---
 
+## 7a. A2 hotfix — 2026‑09‑22 (membership never flipped; plan was one‑shot)
+
+User approved the sandbox subscription (sub `I‑82RXE3SC9RGT`, $1 charged) but membership never flipped.
+Diagnosis (all verified against the LIVE sandbox via API):
+
+- **Webhook was fine all along:** `2G297211261546444` → `…/paypal-webhook`, all four events
+  (ACTIVATED / SUSPENDED / CANCELLED / **RE‑ACTIVATED**) ENABLED. (The "events not selected" alarm was a
+  misread — the list endpoint exposes them as `event_types`, and the detail endpoint shows them enabled.)
+- **Root cause #1 (membership):** `PAYPAL_WEBHOOK_ID` was **not in the local .env** (and evidently not in
+  Render either) → verification string built with the `PASTE_YOUR_WEBHOOK_ID` placeholder → every genuine
+  event 400'd → no state change. FIX: `PAYPAL_WEBHOOK_ID=2G297211261546444` now in the local .env; the
+  USER MUST ADD THE SAME VALUE IN RENDER (pen‑name‑site → Environment). PayPal retries failed deliveries
+  for up to 3 days, so the pending ACTIVATED event should flip the user on its next retry after redeploy.
+- **Root cause #2 (product bug):** plan `P‑5UW59772X95694310NKZAIHI` has `total_cycles: 1` — PayPal
+  **defaults `total_cycles` to 1 when omitted** (spec: 0 = runs forever; 1–999 = finite). So the "monthly
+  membership" was a ONE‑SHOT charge: sub activated 04:30:40Z, EXPIRED ~1s later. PATCH can't fix it (spec:
+  only description / name / payment_preferences / taxes are patchable).
+- **Code fixes (this commit):**
+  1. `ensurePlan` is now self‑healing: validates the cached plan (must be ACTIVE + `total_cycles: 0`),
+     else creates a proper recurring plan (`total_cycles: 0`), best‑effort deactivates the old one, and
+     tolerates duplicate‑name rejection (retries with "… (monthly)"). No DB surgery needed.
+  2. `MEMBERSHIP_EVENTS` gained `BILLING.SUBSCRIPTION.RE‑ACTIVATED` (the API's actual re‑activation name;
+     REINSTATED kept as a legacy alias).
+  3. `server.js` logs every webhook attempt: `[A2] webhook ACCEPTED/REJECTED: <event> — <reason>` →
+     checkable in Render logs.
+- **Tests:** `node test‑a2‑subscriptions.mjs` → all pass (signature, state machine, pipeline, recovery).
+- **Cleanup:** scratch `.dsh‑*.mjs` scripts deleted; previous session's `scratch‑spec‑check.mjs` still
+  untracked (harmless).
+
+---
+
 ## 8. After gqsa‑Site: main‑Site handoff (deferred instruction — do NOT start now)
 
 When the gqsa‑Site work is done, the next project is the **main‑name site** — a *different* site, a different

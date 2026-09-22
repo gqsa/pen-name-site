@@ -814,7 +814,11 @@ app.post('/paypal-webhook', express.raw({ type: '*/*' }), async (req, res) => {
     webhookId: PAYPAL_WEBHOOK_ID,
   });
 
+  const eventType = (result.parsed && result.parsed.event_type) || '(rejected before parsing)';
   if (!result.accepted) {
+    console.log(
+      `[A2] webhook REJECTED: ${eventType} — ${result.reason || 'unknown reason'} (from ${req.ip || 'unknown ip'})`
+    );
     // 4xx tells PayPal "this is a permanent problem" — it will retry with
     // backoff, which is fine (verification is deterministic, so it keeps
     // failing until the problem is fixed). For a forger, 400 + no state
@@ -822,6 +826,9 @@ app.post('/paypal-webhook', express.raw({ type: '*/*' }), async (req, res) => {
     return res.status(400).json({ error: result.reason || 'rejected' });
   }
 
+  console.log(
+    `[A2] webhook ACCEPTED: ${eventType} — ${result.stage}${result.userId ? ` (user ${result.userId})` : ''}`
+  );
   // 2xx = "received, stop retrying" — for BOTH a freshly processed event and
   // a duplicate (idempotency: same event twice = same result, applied once).
   res.status(200).json({ status: result.stage });
