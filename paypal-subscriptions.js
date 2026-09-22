@@ -42,15 +42,19 @@ let tokenExpiresAt = 0;
 
 export async function getPaypalToken() {
   if (cachedToken && Date.now() < tokenExpiresAt - 60_000) return cachedToken; // 1 min safety margin
-  const body = new URLSearchParams({
-    grant_type: 'client_credentials',
-    client_id: PAYPAL_CLIENT_ID,
-    client_secret: PAYPAL_CLIENT_SECRET,
-  });
+  // AUTH TRANSPORT: the credentials go in the standard OAuth2
+  // `Authorization: Basic` header (RFC 6749 §2.3.1), NOT in the form body.
+  // Measured against our sandbox app: body-embedded credentials -> 401
+  // invalid_client; the Basic header -> 200 + token. (Header is also the
+  // method PayPal's own SDKs use, so it stays portable to the live API.)
+  const basic = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString('base64');
   const res = await fetch(`${PAYPAL_BASE_URL}/v1/oauth2/token`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Authorization: `Basic ${basic}`,
+    },
+    body: new URLSearchParams({ grant_type: 'client_credentials' }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.access_token) {
