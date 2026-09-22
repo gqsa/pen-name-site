@@ -368,8 +368,28 @@ export async function verifyPaypalWebhook({ headers, rawBody, webhookId, now = D
       ? { valid: true }
       : {
           valid: false,
+          // DIAGNOSTIC DUMP (2026-09-22 incident): the env var and webhook id
+          // were verified correct, yet genuine PayPal deliveries still failed
+          // verification with no reason. So instead of guessing, we dump every
+          // input that went into the verification:
+          //   - tid/time/wid: must match the event's headers in PayPal's
+          //     dashboard exactly (wid incl. length — catches stray chars)
+          //   - bodylen/bodyhash/bodyhead: compare against the payload shown
+          //     in PayPal's dashboard — if our bodylen/hash differs, the body
+          //     bytes were altered in transit (proxy/middleware)
+          //   - siglen: 256 = 2048-bit RSA key (expected)
+          //   - certfp: sha256 of the PEM text as served — re-fetch the same
+          //     URL locally and compare to confirm we got the same certificate
           reason:
-            'signature mismatch — PAYPAL_WEBHOOK_ID must be EXACTLY the webhook id from the PayPal dashboard (e.g. 2G297211261546444), no stray spaces or newlines',
+            'signature mismatch — ' +
+            `tid=${transmissionId} time=${transmissionTime} ` +
+            `wid=${JSON.stringify(webhookId)} (widlen=${String(webhookId).length}) ` +
+            `algo=${algo} ` +
+            `bodylen=${Buffer.isBuffer(rawBody) ? rawBody.length : typeof rawBody} ` +
+            `bodyhash=${bodyHash.slice(0, 24)}… ` +
+            `bodyhead=${JSON.stringify(Buffer.isBuffer(rawBody) ? rawBody.slice(0, 80).toString('utf8') : String(rawBody).slice(0, 80))} ` +
+            `siglen=${sigBuffer.length} ` +
+            `cert=${certUrl} certfp=${createHash('sha256').update(pem).digest('hex').slice(0, 16)}`,
         };
   } catch (err) {
     return { valid: false, reason: `crypto error: ${err.message}` };
