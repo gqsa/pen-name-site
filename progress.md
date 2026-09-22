@@ -308,6 +308,25 @@ subscription that can't be cancelled), and it was confirmed:
 
 ---
 
+## 7e. Skill written — 2026‑09‑22 (the PayPal runbook is now `paypal-skill.md`)
+
+- **`paypal-skill.md` created** (this workspace): the one‑shot, battle‑tested runbook for the
+  recurring‑membership PayPal integration. It encodes the exact API contract (§3), the webhook
+  verification algorithm (§4), the route map (§5), **all 15 roadblocks and their fixes** (§6), and
+  the verification checklist (§7) — fronted by the two decisions that made it work: **grant via the
+  return‑route API check** (not the webhook) and **cancel via `POST …/cancel`** (not `DELETE`).
+  Includes the three doc links to start from.
+- **`skill-site-creation.md` Step 6** now carries a "superseded — use `paypal-skill.md`" banner so a
+  future agent doesn't re‑follow the buggy one‑shot payment approach.
+- **User's live subscription cancelled** (the 7c grant created it; the 7d broken cancel never
+  cancelled it): `I‑CS2AUE16213G` confirmed as theirs (`custom_id "1"`, buyer
+  `sb‑o5euf52980154@personal.example.com`, started 22:42:36Z), then `POST …/cancel` → **204 →
+  CANCELLED**. No orphaned charging sub remains. Sandbox is clean.
+- **State:** gqsa‑Site A2 is complete and verified (grant + cancel both work end‑to‑end); the skill
+  captures it for reuse. Section 8 (main‑Site handoff) remains deferred — do NOT start it.
+
+---
+
 ## 8. After gqsa‑Site: main‑Site handoff (deferred instruction — do NOT start now)
 
 When the gqsa‑Site work is done, the next project is the **main‑name site** — a *different* site, a different

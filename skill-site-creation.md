@@ -237,6 +237,13 @@ Run it. Update the dashboard to show membership status and a "Become a member" b
 
 ## Step 6: Add PayPal Sandbox Payments
 
+> **⚠️ Superseded for subscriptions.** The one-shot payment approach below was the
+> *first* implementation and carries the bugs it hit in production (one‑shot plan,
+> webhook‑dependent grant, broken DELETE‑based cancel). For a **recurring membership**,
+> use **`paypal-skill.md`** instead — it is the battle‑tested, one‑shot‑correct runbook
+> (return‑route API grant, `POST …/cancel`, verified webhook, full roadblock list).
+> This step is kept only as historical context.
+
 Create `paypal-config.js`:
 
 ```javascript
