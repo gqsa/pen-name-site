@@ -212,6 +212,32 @@ Diagnosis (all verified against the LIVE sandbox via API):
 
 ---
 
+## 7b. A2 hotfix #2 — 2026‑09‑22 (webhook REJECTED ×3: "unknown reason" = signature mismatch)
+
+Live deploy of 7a's code worked (fresh product + recurring plan created on join; user's sub
+`I‑GNWPG3H62NH5` ACTIVE, $1 billed, `custom_id "1"`), but the ACTIVATED webhook still didn't flip
+membership. Render logs showed three PayPal deliveries, all
+`[A2] webhook REJECTED: (rejected before parsing) — unknown reason (from ::1)`.
+
+- **Root cause (diagnosis):** "unknown reason" is only printable when
+  `processPaypalWebhook` returned `{ accepted: false }` **without a reason**. In `verifyPaypalWebhook`,
+  a failed `verifier.verify()` returned `{ valid: false }` — a boolean with **no reason field** — which is
+  the signature-mismatch case. So: PayPal's genuine signatures failed verification ⇒ the verification
+  string (`transmissionId|time|webhookId|bodyHash`) differed from PayPal's ⇒ **`PAYPAL_WEBHOOK_ID` on
+  Render is missing, mistyped, or padded with a stray space/newline from pasting** (the one input we
+  control; body bytes are preserved by `express.raw`, cert comes from PayPal's header).
+- **Code fix (commit 02f301c):** verify-false now returns an explicit reason —
+  `signature mismatch — PAYPAL_WEBHOOK_ID must be EXACTLY the webhook id from the PayPal dashboard …`.
+  Next time, the Render log line self-diagnoses. All 15 tests pass.
+- **State cleanup:** orphaned sub `I‑GNWPG3H62NH5` cancelled via API (204 → CANCELLED) so the user's
+  re-join starts clean.
+- **Unblock (user, manual):** (1) Render → Environment: `PAYPAL_WEBHOOK_ID` must be exactly
+  `2G297211261546444` (17 chars, no whitespace); (2) `git push` (sandbox has no GitHub creds);
+  (3) wait for the deploy to go Live; (4) re-join + approve in the sandbox. If it fails again, the new
+  log line says exactly why.
+
+---
+
 ## 8. After gqsa‑Site: main‑Site handoff (deferred instruction — do NOT start now)
 
 When the gqsa‑Site work is done, the next project is the **main‑name site** — a *different* site, a different
