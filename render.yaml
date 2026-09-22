@@ -3,7 +3,7 @@
 
 services:
   - type: web
-    name: my-website-backend
+    name: pennamesite
     env: node
     # Build command: install all npm dependencies listed in package.json
     buildCommand: npm install
@@ -17,3 +17,7 @@ services:
         value: production
       - key: SESSION_SECRET
         generateValue: true  # Render creates a random secret automatically
+      # Where the app lives (used to build PayPal's return/cancel links).
+      # Matches this service's URL.
+      - key: APP_URL
+        value: https://pennamesite.onrender.com
