@@ -28,7 +28,18 @@ import {
   cancelMembershipFromApi,
 } from './paypal-subscriptions.js';
 
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 const app = express();
+
+// B0 (EJS): server-rendered templates. Pages live in ./views; every page is an
+// EJS template that includes views/partials/head.ejs + footer.ejs for the shared
+// shell. res.locals (e.g. the CSRF token set by the middleware above) is exposed
+// to templates, so forms can embed <%- csrfToken %> directly.
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
 
 // Parse form data sent via POST requests
 app.use(express.urlencoded({ extended: true }));
@@ -223,34 +234,10 @@ function hashPassword(password) {
   return bcrypt.hash(password, BCRYPT_COST); // async — call with await
 }
 
-// Home page
+// Home page — B0: now an EJS template (views/home.ejs). The old member /
+// non-member variants collapse into one template via the `isMember` local.
 app.get('/', (req, res) => {
-  // Check if user is logged in
-  if (req.session.userId) {
-    res.send(`
-      <html>
-        <head><title>My Website</title></head>
-        <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-          <h1>Welcome back!</h1>
-          <p>You are logged in.</p>
-          <p><a href="/dashboard">Go to Dashboard</a></p>
-          <p><a href="/logout">Logout</a></p>
-        </body>
-      </html>
-    `);
-  } else {
-    res.send(`
-      <html>
-        <head><title>My Website</title></head>
-        <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-          <h1>Hello, this is the frontend!</h1>
-          <p>Your backend server is running.</p>
-          <p><a href="/register">Register a new account</a></p>
-          <p><a href="/login">Login</a></p>
-        </body>
-      </html>
-    `);
-  }
+  res.render('home', { isMember: !!req.session.userId });
 });
 
 // Show registration form (GET request)

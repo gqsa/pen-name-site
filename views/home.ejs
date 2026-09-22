@@ -1,0 +1,19 @@
+<%- include('partials/head', { title: 'gqsa' }) %>
+  <div class="center">
+    <% if (isMember) { %>
+      <h1>Welcome back!</h1>
+      <p class="muted">You're logged in.</p>
+      <p class="row" style="justify-content:center;">
+        <a class="btn-link" href="/dashboard">Go to dashboard</a> &nbsp;·&nbsp;
+        <a href="/logout">Log out</a>
+      </p>
+    <% } else { %>
+      <h1>gqsa</h1>
+      <p class="muted">Comics &amp; stories — some free, some member-only.</p>
+      <p class="row" style="justify-content:center;">
+        <a href="/register">Create an account</a> &nbsp;·&nbsp;
+        <a href="/login">Log in</a>
+      </p>
+    <% } %>
+  </div>
+<%- include('partials/footer') %>

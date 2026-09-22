@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
+    "ejs": "^6.0.1",
     "express": "^4.21.0",
     "express-session": "^1.19.0"
   }
