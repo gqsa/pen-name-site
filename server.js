@@ -799,6 +799,25 @@ app.get('/paypal-return', (req, res) => {
   `);
 });
 
+// TEMP DEBUG (2026-09-22 diagnosis) — REMOVE AFTER: serves a fixed SPKI public
+// key so the agent can send a CORRECTLY-SIGNED request through the REAL
+// production path (PayPal-internet → Render proxy → express.raw → verify).
+// If that request is ACCEPTED, the live pipeline is proven healthy and the
+// PayPal-delivery failure is input-specific; if REJECTED, the dump shows why.
+// The key has no private counterpart on this server; the PEM is public data.
+const DEBUG_TEST_PUBKEY_PEM = `-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArzmtxyVDToaovePPr4+D
+z0NQHlDgFzHUYcjUsXAym2756E/Z2z+yDpvhoueCfmiCVYHRyzjPLoeZEnPZRGTx
+Pg2W1XCA1keVPdyFEGcWV/OBRYRVJRhKwpEK4PW7R6j3aEcNoV1y3gqU0rz3LY2C
+OgUzAdgtp915kB9dtihtNn3HQoKG8P3ND2Uom7AcQcT2kR2yhdIfoUPfL/FM2kJU
+jIh94KB6RPcdXIa1ZENB4FTGglUJLcXoJl0lACBWoyZB8/k4y7kEwEBvwjWjjwks
+H2vyK1S1aUwC9mQ42aTqgjJ1LX5iRk4i+q7GHcMDIN7ErTk+MeMtcLb3T2BIjyzo
+KQIDAQAB
+-----END PUBLIC KEY-----`;
+app.get('/debug-cert', (req, res) => {
+  res.type('application/x-pem-file').send(DEBUG_TEST_PUBKEY_PEM);
+});
+
 // A2 ACT 3 (the one that matters): PayPal's SERVERS POST signed events here.
 //
 // Why express.raw()? Signature verification needs the EXACT bytes PayPal
