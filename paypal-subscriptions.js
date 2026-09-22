@@ -356,7 +356,21 @@ export async function verifyPaypalWebhook({ headers, rawBody, webhookId, now = D
   const verifier = createVerify(ALGO_TO_NODE[algo] || 'RSA-SHA256');
   verifier.update(verificationString, 'utf8');
   try {
-    return { valid: verifier.verify(pem, sigBuffer) };
+    const ok = verifier.verify(pem, sigBuffer);
+    // An explicit reason is REQUIRED here: a failed verify() previously
+    // returned `{ valid: false }` with no reason field, so the server logged
+    // the useless "unknown reason" (this masked a live incident where PayPal's
+    // genuine webhooks were rejected three times). A false result means the
+    // signed string did not match — almost always a PAYPAL_WEBHOOK_ID that
+    // differs from the id PayPal signed with (missing, mistyped, or padded
+    // with a stray space/newline from pasting).
+    return ok
+      ? { valid: true }
+      : {
+          valid: false,
+          reason:
+            'signature mismatch — PAYPAL_WEBHOOK_ID must be EXACTLY the webhook id from the PayPal dashboard (e.g. 2G297211261546444), no stray spaces or newlines',
+        };
   } catch (err) {
     return { valid: false, reason: `crypto error: ${err.message}` };
   }
