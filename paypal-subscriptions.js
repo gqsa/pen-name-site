@@ -386,8 +386,8 @@ export async function verifyPaypalWebhook({ headers, rawBody, webhookId, now = D
             `wid=${JSON.stringify(webhookId)} (widlen=${String(webhookId).length}) ` +
             `algo=${algo} ` +
             `bodylen=${Buffer.isBuffer(rawBody) ? rawBody.length : typeof rawBody} ` +
-            `bodyhash=${bodyHash.slice(0, 24)}… ` +
-            `bodyhead=${JSON.stringify(Buffer.isBuffer(rawBody) ? rawBody.slice(0, 80).toString('utf8') : String(rawBody).slice(0, 80))} ` +
+            `bodyhash=${bodyHash} ` +
+            `sig=${signature} ` +
             `siglen=${sigBuffer.length} ` +
             `cert=${certUrl} certfp=${createHash('sha256').update(pem).digest('hex').slice(0, 16)}`,
         };
