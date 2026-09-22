@@ -244,38 +244,7 @@ app.get('/', (req, res) => {
 // A1: server-rendered now (see /login above) — the form must embed this
 // session's hidden CSRF token, which only the server can know.
 app.get('/register', (req, res) => {
-  res.send(`
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <title>Register</title>
-      <style>
-        body { font-family: Arial, sans-serif; max-width: 400px; margin: 50px auto; }
-        input { display: block; width: 100%; padding: 8px; margin: 8px 0; box-sizing: border-box; }
-        button { padding: 10px 20px; background: #4CAF50; color: white; border: none; cursor: pointer; }
-      </style>
-    </head>
-    <body>
-      <h1>Create Account</h1>
-
-      <!-- This form sends data to /register on the server -->
-      <form action="/register" method="POST">
-        <!-- A1: hidden CSRF field — the anti-forgery token for this session -->
-        <input type="hidden" name="csrf" value="${res.locals.csrfToken}">
-
-        <label>Username:</label>
-        <input type="text" name="username" required placeholder="Choose a username">
-
-        <label>Password:</label>
-        <input type="password" name="password" required placeholder="Choose a password">
-
-        <button type="submit">Register</button>
-      </form>
-
-      <p><a href="/">Back to home</a></p>
-    </body>
-    </html>
-  `);
+  res.render('register');
 });
 
 // Handle registration form submission (POST request)
@@ -304,27 +273,15 @@ app.post('/register', async (req, res) => {
       db.prepare("INSERT INTO progress (user_id, item) VALUES (?, ?)").run(userId, item);
     }
     
-    res.send(`
-      <html>
-        <head><title>Success!</title></head>
-        <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-          <h1>Registration successful! 🎉</h1>
-          <p>Welcome, ${username}!</p>
-          <p><a href="/login">Login now</a></p>
-        </body>
-      </html>
-    `);
+    res.render('message', {
+      title: 'Success!', heading: 'Registration successful! 🎉',
+      body: `Welcome, ${username}!`, linkText: 'Login now', linkHref: '/login', tone: 'success',
+    });
   } catch (error) {
-    res.send(`
-      <html>
-        <head><title>Error</title></head>
-        <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-          <h1>Error</h1>
-          <p>${error.message}</p>
-          <p><a href="/register">Try again</a></p>
-        </body>
-      </html>
-    `);
+    res.render('message', {
+      title: 'Error', heading: 'Error',
+      body: error.message, linkText: 'Try again', linkHref: '/register', tone: 'error',
+    });
   }
 });
 
@@ -344,13 +301,10 @@ function loginRateLimiter(req, res, next) {
   const now = Date.now();
   const recent = (loginAttempts.get(req.ip) || []).filter(t => now - t < LOGIN_WINDOW_MS);
   if (recent.length >= LOGIN_MAX_ATTEMPTS) {
-    return res.status(429).send(`
-      <html><body style="font-family: Arial, sans-serif; text-align: center; padding-top: 80px;">
-        <h1>Too many login attempts</h1>
-        <p>Please wait 15 minutes and try again.</p>
-        <p><a href="/">Back to home</a></p>
-      </body></html>
-    `);
+    return res.status(429).render('message', {
+      title: 'Too Many Requests', heading: 'Too many login attempts',
+      body: 'Please wait 15 minutes and try again.', linkText: 'Back to home', linkHref: '/', tone: 'error',
+    });
   }
   recent.push(now);
   loginAttempts.set(req.ip, recent);
@@ -363,39 +317,7 @@ function loginRateLimiter(req, res, next) {
 // page must be built by the server to embed it in the hidden form field.
 // (This is also the first taste of the EJS direction we decided in O6.)
 app.get('/login', (req, res) => {
-  res.send(`
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <title>Login</title>
-      <style>
-        body { font-family: Arial, sans-serif; max-width: 400px; margin: 50px auto; }
-        input { display: block; width: 100%; padding: 8px; margin: 8px 0; box-sizing: border-box; }
-        button { padding: 10px 20px; background: #4CAF50; color: white; border: none; cursor: pointer; }
-        .error { color: red; font-weight: bold; margin-top: 10px; }
-      </style>
-    </head>
-    <body>
-      <h1>Login</h1>
-
-      <form action="/login" method="POST">
-        <!-- A1: hidden CSRF field — the anti-forgery token for this session -->
-        <input type="hidden" name="csrf" value="${res.locals.csrfToken}">
-
-        <label>Username:</label>
-        <input type="text" name="username" required placeholder="Your username">
-
-        <label>Password:</label>
-        <input type="password" name="password" required placeholder="Your password">
-
-        <button type="submit">Login</button>
-      </form>
-
-      <p><a href="/">Back to home</a></p>
-      <p><a href="/register">Don't have an account? Register</a></p>
-    </body>
-    </html>
-  `);
+  res.render('login');
 });
 
 // Handle login form submission (POST request)
@@ -432,28 +354,16 @@ app.post('/login', loginRateLimiter, async (req, res) => {
     req.session.userId = user.id;
     req.session.username = user.username;
     
-    res.send(`
-      <html>
-        <head><title>Login Successful</title></head>
-        <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-          <h1>Login successful! 🎉</h1>
-          <p>Welcome back, ${user.username}!</p>
-          <p><a href="/dashboard">Go to Dashboard</a></p>
-        </body>
-      </html>
-    `);
+    res.render('message', {
+      title: 'Login Successful', heading: 'Login successful! 🎉',
+      body: `Welcome back, ${user.username}!`, linkText: 'Go to Dashboard', linkHref: '/dashboard', tone: 'success',
+    });
   } else {
     // Wrong username or password
-    res.send(`
-      <html>
-        <head><title>Login Failed</title></head>
-        <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-          <h1>Login failed</h1>
-          <p>Wrong username or password.</p>
-          <p><a href="/login">Try again</a></p>
-        </body>
-      </html>
-    `);
+    res.render('message', {
+      title: 'Login Failed', heading: 'Login failed',
+      body: 'Wrong username or password.', linkText: 'Try again', linkHref: '/login', tone: 'error',
+    });
   }
 });
 

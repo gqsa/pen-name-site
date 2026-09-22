@@ -1,0 +1,22 @@
+<%- include('partials/head', { title: 'Login' }) %>
+  <div class="wrap">
+    <div class="card">
+      <h1>Login</h1>
+      <form action="/login" method="POST">
+        <!-- A1: hidden CSRF field — the anti-forgery token for THIS session -->
+        <input type="hidden" name="csrf" value="<%= csrfToken %>">
+
+        <label>Username</label>
+        <input type="text" name="username" required placeholder="Your username" autocomplete="username">
+
+        <label>Password</label>
+        <input type="password" name="password" required placeholder="Your password" autocomplete="current-password">
+
+        <button type="submit">Login</button>
+      </form>
+
+      <p class="muted"><a href="/">Back to home</a></p>
+      <p><a href="/register">Don't have an account? Register</a></p>
+    </div>
+  </div>
+<%- include('partials/footer') %>

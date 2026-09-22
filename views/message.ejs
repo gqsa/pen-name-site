@@ -1,0 +1,7 @@
+<%- include('partials/head', { title: (typeof title !== 'undefined' && title) ? title : 'gqsa' }) %>
+  <div class="center">
+    <h1 class="<%= tone || '' %>"><%= heading %></h1>
+    <% if (body) { %><p><%= body %></p><% } %>
+    <% if (linkHref) { %><p><a href="<%= linkHref %>"><%= linkText %></a></p><% } %>
+  </div>
+<%- include('partials/footer') %>
