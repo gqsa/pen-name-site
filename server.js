@@ -146,7 +146,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS roadmap (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     phase TEXT NOT NULL,             -- 'A' | 'B' | 'C'
-    step TEXT NOT NULL,              -- e.g. "A1", "B3", "C1"
+    step TEXT NOT NULL,              -- e.g. "A1", "B2.5", "C1"
     label TEXT NOT NULL,             -- human-readable description
     done INTEGER DEFAULT 0,          -- 0 = pending, 1 = done
     sort_order INTEGER DEFAULT 0     -- display order
@@ -415,9 +415,9 @@ db.exec(`
 `);
 
 // B1 seed: one tier + a little sample content, ONLY while a table is empty
-// (so a restart never duplicates it). Real content arrives in B2 via uploads;
-// these rows just give the schema something real to hold and B3 something to
-// display while we build the public pages.
+// (so a restart never duplicates it). Real content arrives via the admin
+// upload routes (B2.4); these rows give the schema something real to hold
+// and the editors (B2.5–B2.7) something to work with while they get built.
 {
   const now = Date.now();
   const tierId = db.prepare('SELECT id FROM tiers ORDER BY id LIMIT 1').get();
@@ -471,14 +471,14 @@ db.exec(`
 }
 
 // B2 seed: the implementation roadmap (only while empty — idempotent). The done
-// flags reflect the build state: A1/A2/A3/A5 + B0/B1/B2 + B2.1/B2.2 are done,
+// flags reflect the build state: A1/A2/A3/A5 + B0/B1/B2 + B2.1–B2.3 are done,
 // the rest pending.
 // B2.2: the B2.x sub-steps (the React admin build) are seeded BETWEEN B2 and
-// B3 — a table that predates them gets them from the missing-step pass below.
+// B4 — a table that predates them gets them from the missing-step pass below.
 const B2X_ROWS = [
   ['B2.1', 'Admin area: admin account boot-seed (survives Render wipes)', 1],
   ['B2.2', 'Scaffold admin-frontend (Vite + React) + Express serves it at /admin', 1],
-  ['B2.3', 'Tracker (checklist) in React', 0],
+  ['B2.3', 'Tracker (checklist) in React', 1],
   ['B2.4', 'Content JSON API + uploads (multer)', 0],
   ['B2.5', 'Comic editor in React (upload, reorder, captions, live preview, auto-save)', 0],
   ['B2.6', 'Story editor in React (upload / paste, auto-save)', 0],
@@ -501,11 +501,9 @@ const B2X_ROWS = [
       ['B0', 'Scaffold the project + adopt EJS', 1],
       ['B1', 'Content database (stories / comics + pages / images / videos + tiers)', 1],
       ['B2', 'Admin area + implementation tracker', 1],
-      ...B2X_ROWS, // B2.1–B2.10 sit between B2 and B3
-      ['B3', 'Comic editor — upload, reorder, captions, live preview, auto-save', 0],
+      ...B2X_ROWS, // B2.1–B2.10 sit between B2 and B4 (the old B3/B5 rows merged into B2.5/B2.6)
       ['B4', 'Comic editor — marquee / crop selection', 0],
-      ['B5', 'Story editor — upload / paste / Google Doc link', 0],
-      ['B6', 'Story archive import (read an archive doc’s links → stories)', 0],
+      ['B6', 'Story import (archive doc links → stories; + single-doc link → story body + images)', 0],
       ['B7', 'Story tier-gating (inline highlight → per-tier blur + red border)', 0],
       ['B8', 'Public display pages + member gating + copy-prevention', 0],
       ['B9', 'Storage for real members (deferred)', 0],
@@ -546,7 +544,7 @@ const B2X_ROWS = [
   }
   // B2.2: add the B2.x sub-steps to tables seeded before them (the "missing-step"
   // pattern — the seed above only runs while the table is empty). The rows go
-  // BETWEEN B2 and B3: everything after B2 shifts down by the number of rows
+  // BETWEEN B2 and B4: everything after B2 shifts down by the number of rows
   // added. No-op once every B2.x row exists (idempotent across restarts).
   {
     // NOTE: SQLite LIKE has no backslash escape — 'B2.%' is "B2." + any tail
@@ -568,6 +566,28 @@ const B2X_ROWS = [
         console.log(`[B2.2] added roadmap B2.x rows (${missing.length})`);
       }
     }
+  }
+  // B-step cleanup (2026-09-24): the old B3/B5 rows were merged into B2.5/B2.6
+  // (the editors are the React admin's B2.5–B2.7 — see progress.md). Existing
+  // tables still carry the redundant B3/B5 checkboxes — drop them. And B2.3 is
+  // DONE (the React tracker is live): the seed above marks it done for fresh
+  // tables; this flips it for tables seeded before that fix. No-ops once
+  // applied (idempotent).
+  const dropped = db.prepare("DELETE FROM roadmap WHERE phase = 'B' AND step IN ('B3', 'B5')").run();
+  if (dropped.changes) console.log(`[cleanup] dropped merged roadmap rows B3/B5 (${dropped.changes})`);
+  const b23 = db.prepare("SELECT done FROM roadmap WHERE phase = 'B' AND step = 'B2.3'").get();
+  if (b23 && !b23.done) {
+    db.prepare("UPDATE roadmap SET done = 1 WHERE phase = 'B' AND step = 'B2.3'").run();
+    console.log('[cleanup] marked roadmap B2.3 done');
+  }
+  // B6 grew to include the single-doc case (absorbed from old B5) — refresh the
+  // label on tables seeded with the short version (same pattern as the A3/A4
+  // label refreshes above).
+  const B6_LABEL = 'Story import (archive doc links → stories; + single-doc link → story body + images)';
+  const b6 = db.prepare("SELECT label FROM roadmap WHERE phase = 'B' AND step = 'B6'").get();
+  if (b6 && b6.label !== B6_LABEL) {
+    db.prepare("UPDATE roadmap SET label = ? WHERE phase = 'B' AND step = 'B6'").run(B6_LABEL);
+    console.log('[cleanup] refreshed roadmap B6 label (single-doc import added)');
   }
   // Retire the old per-reader "learning progress" table (no longer used).
   db.exec('DROP TABLE IF EXISTS progress;');
@@ -1070,9 +1090,9 @@ app.post('/admin/toggle-roadmap', (req, res) => {
 
 // A3: MEMBER BLAST — the "a new story is out!" announcement, usable today.
 // Same CSRF posture as /admin/toggle-roadmap (JSON in, X-CSRF-Token header,
-// admin-gated). Sends through notifyMembers() -> the ONE pathway. B8 will
-// add the proper "new content" button; this is the pipe + the handle tests
-// (and the admin page) use.
+// admin-gated). Sends through notifyMembers() -> the ONE pathway. B2.9 adds
+// the proper "Send to members" panel (React admin); this is the pipe + the
+// handle the tests (and the EJS fallback page) use.
 app.post('/admin/notify', (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
   let body = '';
