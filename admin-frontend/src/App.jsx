@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import Tracker from './Tracker.jsx'
 
 // B2.2 — the admin shell.
 //
@@ -72,15 +73,11 @@ export default function App() {
     <div className="wrap">
       <h1>Admin — gqsa</h1>
       <p className="muted">
-        Site owner only. The implementation tracker lands here in B2.3;
-        the comic / story / media editors in B2.5–B2.7.
+        Site owner only. The implementation tracker below is the single source of
+        truth for what's built. The comic / story / media editors land in
+        B2.5–B2.7, the announcements panel in B2.9.
       </p>
-      <div className="panel">
-        <p className="muted" style={{ marginTop: 0 }}>
-          Shell is live — CSRF token acquired
-          (mail transport: <strong>{state.emailTransport}</strong>).
-        </p>
-      </div>
+      <Tracker csrfToken={state.csrfToken} />
       <p style={{ marginTop: '26px' }}>
         <a href="/dashboard">Dashboard</a> · <a href="/">Home</a> · <a href="/logout">Log out</a>
       </p>

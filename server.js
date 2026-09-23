@@ -1033,6 +1033,22 @@ app.get('/api/admin/boot', (req, res) => {
   });
 });
 
+// B2.3: the tracker's list endpoint — the React admin fetches the WHOLE
+// roadmap (all phases, in sort_order) and renders the checklist (the EJS
+// page used to server-render the same query — renderEjsAdmin above).
+// Admin-gated exactly like /api/admin/boot. It's a GET (read-only), so the
+// global CSRF middleware (POST-only) doesn't apply — the CSRF posture lives
+// on the state-changing POST /admin/toggle-roadmap below.
+app.get('/api/admin/roadmap', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  const items = db.prepare('SELECT id, phase, step, label, done FROM roadmap ORDER BY sort_order').all();
+  res.json({
+    items,
+    done: items.filter(r => r.done).length,
+    total: items.length,
+  });
+});
+
 // Toggle a roadmap item's done flag (the check / uncheck in the tracker).
 app.post('/admin/toggle-roadmap', (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });

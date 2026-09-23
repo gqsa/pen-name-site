@@ -217,14 +217,19 @@ try {
       `got ${res.status}`);
   }
 
-  // 7. /admin AND /api/admin/boot are forbidden for a logged-in NON-owner
+  // 7. /admin, /api/admin/boot AND /api/admin/roadmap are forbidden for a
+  //    logged-in NON-owner (B2.3 added the roadmap list endpoint — it must be
+  //    as gated as the page and the boot endpoint)
   {
     const res = await get('/admin', sUser);
     const boot = await get('/api/admin/boot', sUser);
     const bootText = await boot.text();
-    check('admin area is forbidden for a non-owner (403, /admin + /api/admin/boot)',
-      res.status === 403 && boot.status === 403 && /Not admin/.test(bootText),
-      `got ${res.status}/${boot.status}`);
+    const roadmap = await get('/api/admin/roadmap', sUser);
+    const roadmapText = await roadmap.text();
+    check('admin area is forbidden for a non-owner (403, /admin + /api/admin/boot + /api/admin/roadmap)',
+      res.status === 403 && boot.status === 403 && roadmap.status === 403
+        && /Not admin/.test(bootText) && /Not admin/.test(roadmapText),
+      `got ${res.status}/${boot.status}/${roadmap.status}`);
   }
 
   // 8–10. /admin/toggle-roadmap: the fetch()-style CSRF check (the header
