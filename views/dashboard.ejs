@@ -13,17 +13,12 @@
       <p>Membership status: <strong>Free</strong></p>
     <% } %>
 
-    <h2>Your learning progress</h2>
-    <ul class="checklist">
-      <% for (const item of items) { %>
-        <li>
-          <input type="checkbox" id="item-<%= item.id %>" data-id="<%= item.id %>"
-            <% if (item.completed) { %>checked<% } %>
-            onchange="toggleItem(<%= item.id %>, this.checked)">
-          <label for="item-<%= item.id %>" style="margin:0;"><%= item.item %></label>
-        </li>
-      <% } %>
-    </ul>
+    <% if (typeof isAdmin !== 'undefined' && isAdmin) { %>
+      <div class="panel panel--member">
+        <h3 style="margin-top:0;">Site owner</h3>
+        <p><a href="/admin">Open the admin area →</a> (implementation tracker + the comic / story editors as they land).</p>
+      </div>
+    <% } %>
 
     <% if (isMember) { %>
       <div class="panel panel--member">
@@ -66,18 +61,5 @@
     <% } %>
 
     <p><a href="/logout">Log out</a></p>
-
-    <script>
-      // Save progress when a checkbox is clicked. fetch() isn't a form, so the
-      // CSRF token travels in a header (X-CSRF-Token), not a hidden field.
-      async function toggleItem(id, completed) {
-        const response = await fetch('/save-progress', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': '<%= csrfToken %>' },
-          body: JSON.stringify({ id: id, completed: completed ? 1 : 0 })
-        });
-        console.log('Saved:', response.ok);
-      }
-    </script>
   </div>
 <%- include('partials/footer') %>

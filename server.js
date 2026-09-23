@@ -138,12 +138,17 @@ db.exec(`
     member INTEGER DEFAULT 0
   );
 
-  CREATE TABLE IF NOT EXISTS progress (
+  -- B2: the implementation roadmap — the single source of truth for "what's
+  -- built". (The old per-reader "learning progress" checklist is RETIRED: it
+  -- was a learning aid, but this is now a real product, so we track the BUILD
+  -- itself, in the admin area, not per reader.)
+  CREATE TABLE IF NOT EXISTS roadmap (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    item TEXT NOT NULL,
-    completed INTEGER DEFAULT 0,
-    FOREIGN KEY (user_id) REFERENCES users(id)
+    phase TEXT NOT NULL,             -- 'A' | 'B' | 'C'
+    step TEXT NOT NULL,              -- e.g. "A1", "B3", "C1"
+    label TEXT NOT NULL,             -- human-readable description
+    done INTEGER DEFAULT 0,          -- 0 = pending, 1 = done
+    sort_order INTEGER DEFAULT 0     -- display order
   );
 `);
 
@@ -367,6 +372,43 @@ db.exec(`
   }
 }
 
+// B2 seed: the implementation roadmap (only while empty — idempotent). The done
+// flags reflect the build state: A1/A2/A5 + B0/B1/B2 are done, the rest pending.
+{
+  if (db.prepare('SELECT COUNT(*) c FROM roadmap').get().c === 0) {
+    const ins = db.prepare('INSERT INTO roadmap (phase, step, label, done, sort_order) VALUES (?, ?, ?, ?, ?)');
+    const A = [
+      ['A1', 'Security hardening (bcrypt, env secrets, CSRF, login rate-limit)', 1],
+      ['A2', 'Recurring payments (PayPal Subscriptions + signed webhooks)', 1],
+      ['A3', 'Password reset (email-based)', 0],
+      ['A4', 'Admin panel (members, tiers, payments)', 0],
+      ['A5', 'Frontend approach (EJS) — decided + adopted', 1],
+    ];
+    const B = [
+      ['B0', 'Scaffold the project + adopt EJS', 1],
+      ['B1', 'Content database (stories / comics + pages / images / videos + tiers)', 1],
+      ['B2', 'Admin area + implementation tracker', 1],
+      ['B3', 'Comic editor — upload, reorder, captions, live preview, auto-save', 0],
+      ['B4', 'Comic editor — marquee / crop selection', 0],
+      ['B5', 'Story editor — upload / paste / Google Doc link', 0],
+      ['B6', 'Story archive import (read an archive doc’s links → stories)', 0],
+      ['B7', 'Story tier-gating (inline highlight → per-tier blur + red border)', 0],
+      ['B8', 'Public display pages + member gating + copy-prevention', 0],
+      ['B9', 'Storage for real members (deferred)', 0],
+    ];
+    const C = [
+      ['C1', 'Deploy to Hostinger / domain (deferred)', 0],
+    ];
+    let order = 0;
+    for (const [step, label, done] of A) ins.run('A', step, label, done, order++);
+    for (const [step, label, done] of B) ins.run('B', step, label, done, order++);
+    for (const [step, label, done] of C) ins.run('C', step, label, done, order++);
+    console.log(`[B2] seeded implementation roadmap (${order} items)`);
+  }
+  // Retire the old per-reader "learning progress" table (no longer used).
+  db.exec('DROP TABLE IF EXISTS progress;');
+}
+
 // Helper function to hash passwords — A1: now bcrypt, not SHA-256.
 // WHY bcrypt and not SHA-256?
 //   SHA-256 is designed to be FAST — a GPU can compute a BILLION of them per
@@ -412,19 +454,6 @@ app.post('/register', async (req, res) => {
     // Get the ID of the newly created user
     const userId = result.lastInsertRowid;
 
-    // Create default checklist items for this new user
-    const defaultItems = [
-      "Learn what a backend is",
-      "Understand databases and SQL",
-      "Build user registration",
-      "Implement login with sessions",
-      "Create a protected dashboard"
-    ];
-    
-    for (const item of defaultItems) {
-      db.prepare("INSERT INTO progress (user_id, item) VALUES (?, ?)").run(userId, item);
-    }
-    
     res.render('message', {
       title: 'Success!', heading: 'Registration successful! 🎉',
       body: `Welcome, ${username}!`, linkText: 'Login now', linkHref: '/login', tone: 'success',
@@ -530,11 +559,10 @@ app.get('/dashboard', (req, res) => {
     });
   }
 
-  // User is logged in — load their progress + fresh membership state, then let
-  // views/dashboard.ejs do the conditional rendering (status line, member box,
-  // membership panel). The server still DECIDES membership; the template only
-  // displays what we hand it.
-  const items = db.prepare("SELECT * FROM progress WHERE user_id = ? ORDER BY id").all(req.session.userId);
+  // User is logged in — load fresh membership state + whether THIS account is
+  // the admin (for the /admin link), then let views/dashboard.ejs do the
+  // conditional rendering. The server DECIDES membership + admin; the template
+  // only displays what we hand it.
   const userRow = db.prepare("SELECT * FROM users WHERE id = ?").get(req.session.userId);
   const isMember = userRow && userRow.member === 1;
   const membershipStatus = userRow?.membership_status || 'free'; // free | active | suspended | cancelled
@@ -544,8 +572,8 @@ app.get('/dashboard', (req, res) => {
 
   res.render('dashboard', {
     username: req.session.username,
-    items,
     isMember,
+    isAdmin: isAdmin(req),
     membershipStatus,
     memberSince,
     billingEmail: userRow.email || '',
@@ -554,23 +582,43 @@ app.get('/dashboard', (req, res) => {
   });
 });
 
-// API endpoint to save progress item
-app.post('/save-progress', (req, res) => {
-  if (!req.session.userId) {
-    return res.status(401).json({error: 'Not logged in'});
-  }
+// B2: ADMIN AREA — gated to the site owner. The creator's username (set as
+// ADMIN_USERNAME in .env) is the only admin; if that env var is empty, nobody
+// is admin. Every admin route checks isAdmin(req) first.
+function isAdmin(req) {
+  return !!process.env.ADMIN_USERNAME && req.session.username === process.env.ADMIN_USERNAME;
+}
 
-  // Parse JSON body manually since we're not using express.json() middleware
+// The implementation tracker: the A/B/C roadmap with done = checked.
+app.get('/admin', (req, res) => {
+  if (!isAdmin(req)) {
+    return res.status(403).render('message', {
+      title: 'Forbidden', heading: 'Not your area', tone: 'error',
+      body: 'The admin area is only for the site owner.', linkText: 'Back to home', linkHref: '/',
+    });
+  }
+  const roadmap = db.prepare('SELECT id, phase, step, label, done FROM roadmap ORDER BY sort_order').all();
+  const byPhase = { A: [], B: [], C: [] };
+  for (const r of roadmap) (byPhase[r.phase] || (byPhase[r.phase] = [])).push(r);
+  const doneCount = roadmap.filter(r => r.done).length;
+  res.render('admin', { byPhase, doneCount, total: roadmap.length, csrfToken: req.session.csrfToken });
+});
+
+// Toggle a roadmap item's done flag (the check / uncheck in the tracker).
+app.post('/admin/toggle-roadmap', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
   let body = '';
   req.on('data', chunk => { body += chunk; });
   req.on('end', () => {
     try {
-      const data = JSON.parse(body);
-      db.prepare("UPDATE progress SET completed = ? WHERE id = ? AND user_id = ?")
-        .run(data.completed, data.id, req.session.userId);
-      res.json({success: true});
+      const { id } = JSON.parse(body);
+      const row = db.prepare('SELECT done FROM roadmap WHERE id = ?').get(id);
+      if (!row) return res.status(404).json({ error: 'Not found' });
+      const next = row.done ? 0 : 1;
+      db.prepare('UPDATE roadmap SET done = ? WHERE id = ?').run(next, id);
+      res.json({ success: true, done: next });
     } catch (e) {
-      res.status(400).json({error: e.message});
+      res.status(400).json({ error: e.message });
     }
   });
 });

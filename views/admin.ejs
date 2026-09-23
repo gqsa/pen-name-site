@@ -1,0 +1,43 @@
+<%- include('partials/head', { title: 'Admin' }) %>
+  <div class="wrap" style="max-width:780px;">
+    <h1>Admin — gqsa</h1>
+    <p class="muted">Site owner only. The implementation tracker below is the single source of truth
+      for what's built. The comic / story editors arrive in B3–B7.</p>
+
+    <h2>Implementation tracker <span class="muted" style="font-weight:400;">(<%= doneCount %> / <%= total %> done)</span></h2>
+
+    <% for (const phase of ['A','B','C']) { %>
+      <% const items = byPhase[phase] || []; %>
+      <% if (items.length) { %>
+        <h3 style="margin-bottom:4px;">Phase <%= phase %></h3>
+        <ul class="checklist">
+          <% for (const item of items) { %>
+            <li>
+              <input type="checkbox" id="rm-<%= item.id %>" data-id="<%= item.id %>"
+                <% if (item.done) { %>checked<% } %>
+                onchange="toggleRoadmap(<%= item.id %>, this.checked)">
+              <label for="rm-<%= item.id %>" style="margin:0; <%= item.done ? '' : 'color:var(--muted);' %>">
+                <strong><%= item.step %></strong> — <%= item.label %>
+              </label>
+            </li>
+          <% } %>
+        </ul>
+      <% } %>
+    <% } %>
+
+    <p style="margin-top:26px;"><a href="/dashboard">Dashboard</a> · <a href="/">Home</a> · <a href="/logout">Log out</a></p>
+
+    <script>
+      // Toggling a roadmap item hits /admin/toggle-roadmap (a fetch, so the CSRF
+      // token travels in the X-CSRF-Token header, like the old checklist did).
+      async function toggleRoadmap(id, done) {
+        const response = await fetch('/admin/toggle-roadmap', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': '<%= csrfToken %>' },
+          body: JSON.stringify({ id: id })
+        });
+        console.log('Roadmap saved:', response.ok);
+      }
+    </script>
+  </div>
+<%- include('partials/footer') %>
