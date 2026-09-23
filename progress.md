@@ -180,8 +180,9 @@ These don't block planning, but they **will** change scope. Mark them when decid
 >
 > **Push / deploy status (user asked 2026‑09‑22):** there **IS** a live test deploy — Render free tier
 > (`pen-name-site.onrender.com`), auto‑deployed from the GitHub repo this workspace pushes to
-> (`gqsa/pen-name-site`). The live service is still running the A2‑hotfix #5 code (pre‑EJS, pre‑content‑DB)
-> because B0–B2.1 **+ A3** haven't been pushed yet. Guardrails on every step: (1) a git commit (rollback
+> (`gqsa/pen-name-site`). **Pushed 2026‑09‑23: origin/main = b7c840d (A3) — everything (B0–B2.1 + A3) is now
+> on Render** (auto‑deployed; the free‑tier disk wipe per C3 means the live DB/uploads reset — the boot‑seed
+> recreates the admin from `ADMIN_USERNAME`/`ADMIN_PASSWORD` in Render's env). Guardrails on every step: (1) a git commit (rollback
 > available) and (2) the suites green — `test-a1-security.mjs` (**14/14**) + `test-a2-subscriptions.mjs`
 > (**18/18**, incl. live section) + `test-a3-accounts.mjs` (**18/18**), all self‑contained. B‑steps are additive
 > (new routes/tables/pages), not changes to the A1/A2 core (auth + PayPal), so pushing is low‑risk; a push
