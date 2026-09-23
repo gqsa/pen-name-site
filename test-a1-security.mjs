@@ -14,18 +14,22 @@
 //   2. a POST without that token is rejected (403)  ← the CSRF fix
 //   3. registration stores a BCRYPT hash, not plain SHA-256  ← the bcrypt fix
 //   4. login still works with the correct password
-//   5. B2 admin area: /admin renders for the owner (200 + tracker) and is
-//      403 for a logged-in non-owner; /admin/toggle-roadmap needs the
-//      X-CSRF-Token header (the fetch() version of #2 — it replaced the
-//      retired /save-progress endpoint) and rejects a valid token from a
-//      non-owner (the ADMIN_USERNAME gate)
+//   5. B2 admin area: the admin account is AUTO-CREATED at boot from
+//      ADMIN_USERNAME + ADMIN_PASSWORD (the fresh-disk path that keeps the
+//      owner able to log in on Render's wiped free-tier disk); /admin renders
+//      for the owner (200 + tracker) and is 403 for a logged-in non-owner;
+//      /admin/toggle-roadmap needs the X-CSRF-Token header (the fetch()
+//      version of #2 — it replaced the retired /save-progress endpoint) and
+//      rejects a valid token from a non-owner (the ADMIN_USERNAME gate)
 //   6. a legacy SHA-256 account can still log in AND gets transparently
 //      upgraded to bcrypt on first login  ← migration path
 //   7. too many failed logins → 429  ← the rate-limit fix
 //
-// NOTE: the spawned server shares the repo's database.db; the test registers
-// ts-suffixed throwaway users, and the one roadmap row it toggles is restored
-// to its original state before the test ends.
+// NOTE: the spawned server shares the repo's database.db. The admin account
+// (a ts-suffixed name) is created by the server's OWN boot-seed — that's the
+// fresh-disk path under test; the test also registers ts-suffixed throwaway
+// users, and the one roadmap row it toggles is restored to its original state
+// before the test ends.
 
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
@@ -70,7 +74,7 @@ const BASE = `http://localhost:${port}`;
 // server's log lines with the test output.
 const child = spawn(process.execPath, ['server.js'], {
   cwd: __dirname,
-  env: { ...process.env, PORT: String(port), ADMIN_USERNAME: ADMIN_USER, SESSION_SECRET: 'a1-test-secret' },
+  env: { ...process.env, PORT: String(port), ADMIN_USERNAME: ADMIN_USER, ADMIN_PASSWORD: PASS, SESSION_SECRET: 'a1-test-secret' },
   stdio: 'inherit',
 });
 let childExitCode = null;
@@ -175,19 +179,20 @@ try {
     sUser = s;
   }
 
-  // 5. B2 admin area — register + log in the owner account. Its username is
-  //    exactly the ADMIN_USERNAME the spawned server was given, so this
-  //    session is the site owner.
+  // 5. B2.1 — the admin account is AUTO-CREATED at boot from
+  //    ADMIN_USERNAME + ADMIN_PASSWORD (the fresh-disk path that keeps the
+  //    owner able to log in after a Render free-tier wipe). This run's admin
+  //    name is brand-new, so the boot-seed just created it — log in with the
+  //    env password. (No registration step: that would be testing nothing.)
   let sAdmin;
   {
     const s = await newSession();
-    const reg = await postForm('/register', s, { username: ADMIN_USER, password: PASS });
-    if (reg.status !== 200) throw new Error(`admin registration failed (status ${reg.status})`);
-    const s2 = await newSession();
-    const login = await postForm('/login', s2, { username: ADMIN_USER, password: PASS });
+    const login = await postForm('/login', s, { username: ADMIN_USER, password: PASS });
     const html = await login.text();
-    if (login.status !== 200 || !/Login successful/.test(html)) throw new Error(`admin login failed (status ${login.status})`);
-    sAdmin = s2;
+    check('admin account is auto-created at boot (login with env password works)',
+      login.status === 200 && /Login successful/.test(html), `status ${login.status}`);
+    if (login.status !== 200) throw new Error('admin login failed — the boot-seed did not create the account');
+    sAdmin = s;
   }
 
   // 6. /admin renders for the owner, with the implementation tracker

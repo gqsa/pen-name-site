@@ -428,6 +428,30 @@ function hashPassword(password) {
   return bcrypt.hash(password, BCRYPT_COST); // async — call with await
 }
 
+// B2.1: the admin ACCOUNT itself must survive Render's free-tier disk wipes
+// (C3). Env vars persist across redeploys; database.db does not. So at boot,
+// if ADMIN_USERNAME names an account that doesn't exist yet, create it with
+// ADMIN_PASSWORD (bcrypt-hashed, exactly like registration). That's what keeps
+// the owner able to log in as admin after every wipe.
+// Rules:
+//   - An EXISTING account is never touched — the seed only fills a missing
+//     account, so a locally-changed password always wins.
+//   - ADMIN_USERNAME set but ADMIN_PASSWORD missing (and no account) means
+//     nobody can log in as admin → warn loudly at boot instead of failing
+//     silently (the admin area 403s for everyone, which looks like a bug).
+if (process.env.ADMIN_USERNAME) {
+  const adminRow = db.prepare('SELECT id FROM users WHERE username = ?').get(process.env.ADMIN_USERNAME);
+  if (adminRow) {
+    // Account exists (local machine, or pre-wipe state) — leave it alone.
+  } else if (process.env.ADMIN_PASSWORD) {
+    await db.prepare('INSERT INTO users (username, password) VALUES (?, ?)')
+      .run(process.env.ADMIN_USERNAME, await hashPassword(process.env.ADMIN_PASSWORD));
+    console.log(`[B2.1] created admin account "${process.env.ADMIN_USERNAME}" from env (fresh disk)`);
+  } else {
+    console.warn(`[B2.1] WARNING: ADMIN_USERNAME="${process.env.ADMIN_USERNAME}" is set but the account does not exist AND ADMIN_PASSWORD is not set — the admin area is unreachable. Set ADMIN_PASSWORD in the environment (see .env.example).`);
+  }
+}
+
 // Home page — B0: now an EJS template (views/home.ejs). The old member /
 // non-member variants collapse into one template via the `isMember` local.
 app.get('/', (req, res) => {
