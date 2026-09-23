@@ -16,6 +16,10 @@ npm-cache/
 # Environment variables (keep secrets out of git)
 .env
 
+# Personal notes — workspace-only, NOT part of the site (user's call, 2026-09-23)
+progress.md
+paypal-skill.md
+
 # A3 email outbox (local inspection/test artifact of the "file" transport)
 .mailoutbox.json
 .mailoutbox-*.json
