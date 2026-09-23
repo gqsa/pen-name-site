@@ -24,7 +24,9 @@
 //       (no account-enumeration oracle)
 //  12.  the reset link works: set a new password (old one stops working)
 //  13.  the reset token is SINGLE-USE (replaying it is refused)
-//  14.  /admin renders the "Member announcements" panel for the owner
+//  14.  /admin is reachable for the owner (B2.2: it serves the React shell —
+//       the announcements panel itself is covered endpoint-wise by #15 and
+//       returns as a React panel in B2.9)
 //  15.  /admin/notify blasts exactly the eligible accounts (counts match the DB),
 //       the opted-out one is NOT emailed, and the mail is in the outbox
 //  16.  /admin/notify rejects a logged-in NON-owner (403)
@@ -339,7 +341,10 @@ try {
     check('a used reset token is refused (single-use)', /no longer valid/.test(html));
   }
 
-  // 14. /admin shows the Member announcements panel to the owner
+  // 14. /admin is reachable for the owner. B2.2 flipped /admin to the React
+  //     shell, so the EJS "Member announcements" panel assertion is retired
+  //     here: the blast endpoint itself is covered by #15–16 below, and the
+  //     panel returns as a React component in B2.9.
   let sAdmin;
   {
     const s = await newSession(base1);
@@ -349,8 +354,8 @@ try {
     if (!ok) throw new Error('admin login failed — the boot-seed did not create the account');
     const res = await fetch(base1 + '/admin', { headers: { cookie: s.cookie, 'connection': 'close' } });
     const html = await res.text();
-    check('/admin renders the "Member announcements" panel for the owner',
-      res.status === 200 && /Member announcements/.test(html) && /Send to members/.test(html),
+    check('/admin is reachable for the owner (200 — React shell since B2.2)',
+      res.status === 200 && /id="root"/.test(html),
       `status ${res.status}`);
   }
 

@@ -23,3 +23,7 @@ paypal-skill.md
 # A3 email outbox (local inspection/test artifact of the "file" transport)
 .mailoutbox.json
 .mailoutbox-*.json
+
+# B2.2: the built admin SPA (built by `npm run build:admin`; Render gets the
+# build step in B2.10 — last resort if it struggles: commit dist)
+admin-frontend/dist/

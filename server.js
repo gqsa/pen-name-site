@@ -4,7 +4,7 @@ import session from 'express-session';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import bcrypt from 'bcryptjs'; // the bcrypt algorithm in pure JS (same hashes, no native build)
-import { readFileSync, writeFileSync, rmSync } from 'node:fs'; // A3: the "file" email transport (outbox)
+import { readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs'; // A3: the "file" email transport (outbox); B2.2: existsSync for the admin-frontend dist check
 // A1 (env-only secrets): load .env BEFORE paypal-config.js, because ES modules
 // run in import order and paypal-config reads process.env the moment it loads.
 import './loadEnv.js';
@@ -471,7 +471,22 @@ db.exec(`
 }
 
 // B2 seed: the implementation roadmap (only while empty — idempotent). The done
-// flags reflect the build state: A1/A2/A5 + B0/B1/B2 are done, the rest pending.
+// flags reflect the build state: A1/A2/A3/A5 + B0/B1/B2 + B2.1/B2.2 are done,
+// the rest pending.
+// B2.2: the B2.x sub-steps (the React admin build) are seeded BETWEEN B2 and
+// B3 — a table that predates them gets them from the missing-step pass below.
+const B2X_ROWS = [
+  ['B2.1', 'Admin area: admin account boot-seed (survives Render wipes)', 1],
+  ['B2.2', 'Scaffold admin-frontend (Vite + React) + Express serves it at /admin', 1],
+  ['B2.3', 'Tracker (checklist) in React', 0],
+  ['B2.4', 'Content JSON API + uploads (multer)', 0],
+  ['B2.5', 'Comic editor in React (upload, reorder, captions, live preview, auto-save)', 0],
+  ['B2.6', 'Story editor in React (upload / paste, auto-save)', 0],
+  ['B2.7', 'Image / video upload editor in React', 0],
+  ['B2.8', 'Multi-editor + minimise-all', 0],
+  ['B2.9', 'Member announcements in React + retire the EJS admin page', 0],
+  ['B2.10', 'Production wiring + Render deploy + runbook', 0],
+];
 {
   if (db.prepare('SELECT COUNT(*) c FROM roadmap').get().c === 0) {
     const ins = db.prepare('INSERT INTO roadmap (phase, step, label, done, sort_order) VALUES (?, ?, ?, ?, ?)');
@@ -486,6 +501,7 @@ db.exec(`
       ['B0', 'Scaffold the project + adopt EJS', 1],
       ['B1', 'Content database (stories / comics + pages / images / videos + tiers)', 1],
       ['B2', 'Admin area + implementation tracker', 1],
+      ...B2X_ROWS, // B2.1–B2.10 sit between B2 and B3
       ['B3', 'Comic editor — upload, reorder, captions, live preview, auto-save', 0],
       ['B4', 'Comic editor — marquee / crop selection', 0],
       ['B5', 'Story editor — upload / paste / Google Doc link', 0],
@@ -527,6 +543,31 @@ db.exec(`
     db.prepare("INSERT INTO roadmap (phase, step, label, done, sort_order) VALUES ('B', 'B10', ?, 0, ?)")
       .run(B10_LABEL, nextOrder);
     console.log('[A3] added roadmap B10 row');
+  }
+  // B2.2: add the B2.x sub-steps to tables seeded before them (the "missing-step"
+  // pattern — the seed above only runs while the table is empty). The rows go
+  // BETWEEN B2 and B3: everything after B2 shifts down by the number of rows
+  // added. No-op once every B2.x row exists (idempotent across restarts).
+  {
+    // NOTE: SQLite LIKE has no backslash escape — 'B2.%' is "B2." + any tail
+    // (a backslash would be a literal char and match nothing).
+    const existing = new Set(
+      db.prepare("SELECT step FROM roadmap WHERE phase = 'B' AND step LIKE 'B2.%'").all().map(r => r.step)
+    );
+    const missing = B2X_ROWS.filter(([step]) => !existing.has(step));
+    if (missing.length) {
+      const b2 = db.prepare("SELECT sort_order FROM roadmap WHERE phase = 'B' AND step = 'B2'").get();
+      if (b2) {
+        db.prepare('UPDATE roadmap SET sort_order = sort_order + ? WHERE sort_order > ?')
+          .run(missing.length, b2.sort_order);
+        let order = b2.sort_order + 1;
+        const ins = db.prepare('INSERT INTO roadmap (phase, step, label, done, sort_order) VALUES (?,?,?,?,?)');
+        for (const [step, label, done] of B2X_ROWS) {
+          if (!existing.has(step)) ins.run('B', step, label, done, order++);
+        }
+        console.log(`[B2.2] added roadmap B2.x rows (${missing.length})`);
+      }
+    }
   }
   // Retire the old per-reader "learning progress" table (no longer used).
   db.exec('DROP TABLE IF EXISTS progress;');
@@ -941,14 +982,16 @@ function isAdmin(req) {
   return !!process.env.ADMIN_USERNAME && req.session.username === process.env.ADMIN_USERNAME;
 }
 
+// B2.2: /admin is now the REACT SPA (admin-frontend) — but the gate stays
+// server-side, and the EJS admin page (views/admin.ejs, retired in B2.9) is
+// the fallback when dist/ hasn't been built yet (fresh clone, or a Render
+// deploy before B2.10's build step lands). Either way, the SPA HTML never
+// leaves an admin session.
+const ADMIN_DIST = path.join(__dirname, 'admin-frontend', 'dist');
+
 // The implementation tracker: the A/B/C roadmap with done = checked.
-app.get('/admin', (req, res) => {
-  if (!isAdmin(req)) {
-    return res.status(403).render('message', {
-      title: 'Forbidden', heading: 'Not your area', tone: 'error',
-      body: 'The admin area is only for the site owner.', linkText: 'Back to home', linkHref: '/',
-    });
-  }
+// (EJS admin page — the no-build fallback; the React version lands in B2.3.)
+function renderEjsAdmin(req, res) {
   const roadmap = db.prepare('SELECT id, phase, step, label, done FROM roadmap ORDER BY sort_order').all();
   const byPhase = { A: [], B: [], C: [] };
   for (const r of roadmap) (byPhase[r.phase] || (byPhase[r.phase] = [])).push(r);
@@ -957,6 +1000,35 @@ app.get('/admin', (req, res) => {
     byPhase, doneCount, total: roadmap.length, csrfToken: req.session.csrfToken,
     // A3: the blast panel shows WHERE the mail is going (console log vs outbox
     // file) so the owner knows where to look after "Send".
+    emailTransport: EMAIL_TRANSPORT,
+  });
+}
+
+app.get('/admin', (req, res) => {
+  if (!isAdmin(req)) {
+    return res.status(403).render('message', {
+      title: 'Forbidden', heading: 'Not your area', tone: 'error',
+      body: 'The admin area is only for the site owner.', linkText: 'Back to home', linkHref: '/',
+    });
+  }
+  const distIndex = path.join(ADMIN_DIST, 'index.html');
+  if (existsSync(distIndex)) {
+    return res.sendFile(distIndex); // B2.2: the React shell
+  }
+  console.warn('[B2.2] admin-frontend/dist is missing — serving the EJS admin page. Run `npm run build:admin`.');
+  return renderEjsAdmin(req, res);
+});
+
+// B2.2: the SPA's boot endpoint — the source of the X-CSRF-Token header the
+// React app sends on every state-changing POST (the fetch() version of the
+// A1 posture; the EJS pages embed the same token in hidden form fields).
+// Admin-gated exactly like the page itself: a non-admin gets 403, and the
+// shell's "not admin" screen is pure display, never a grant.
+app.get('/api/admin/boot', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  res.json({
+    isAdmin: true,
+    csrfToken: getCsrfToken(req),
     emailTransport: EMAIL_TRANSPORT,
   });
 });
@@ -1000,6 +1072,24 @@ app.post('/admin/notify', (req, res) => {
     }
   });
 });
+
+// B2.2: the built SPA's assets (Vite base '/admin/' → /admin/assets/…).
+// Served to ADMIN SESSIONS ONLY — the bundle is the admin app itself, so a
+// non-admin never even receives it (the page-level 403 above covers /admin;
+// this covers its sub-paths). Registered AFTER the exact /admin routes above,
+// so those keep winning; mounted only when dist/ exists, so a pre-build
+// checkout has no dangling static middleware at all.
+if (existsSync(ADMIN_DIST)) {
+  app.use('/admin', (req, res, next) => {
+    if (!isAdmin(req)) {
+      return res.status(403).render('message', {
+        title: 'Forbidden', heading: 'Not your area', tone: 'error',
+        body: 'The admin area is only for the site owner.', linkText: 'Back to home', linkHref: '/',
+      });
+    }
+    next();
+  }, express.static(ADMIN_DIST));
+}
 
 // ===========================================================================
 // A2: RECURRING MEMBERSHIP (PayPal Subscriptions + signed webhooks)

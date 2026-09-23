@@ -16,11 +16,14 @@
 //   4. login still works with the correct password
 //   5. B2 admin area: the admin account is AUTO-CREATED at boot from
 //      ADMIN_USERNAME + ADMIN_PASSWORD (the fresh-disk path that keeps the
-//      owner able to log in on Render's wiped free-tier disk); /admin renders
-//      for the owner (200 + tracker) and is 403 for a logged-in non-owner;
-//      /admin/toggle-roadmap needs the X-CSRF-Token header (the fetch()
-//      version of #2 — it replaced the retired /save-progress endpoint) and
-//      rejects a valid token from a non-owner (the ADMIN_USERNAME gate)
+//      owner able to log in on Render's wiped free-tier disk); B2.2: /admin
+//      serves the REACT shell to the owner (200 + root element — the EJS
+//      page is only the no-build fallback) and /api/admin/boot returns
+//      isAdmin + csrfToken (the SPA's X-CSRF-Token source); both are 403 for
+//      a logged-in non-owner; /admin/toggle-roadmap needs the X-CSRF-Token
+//      header (the fetch() version of #2 — it replaced the retired
+//      /save-progress endpoint) and rejects a valid token from a non-owner
+//      (the ADMIN_USERNAME gate)
 //   6. a legacy SHA-256 account can still log in AND gets transparently
 //      upgraded to bcrypt on first login  ← migration path
 //   7. too many failed logins → 429  ← the rate-limit fix
@@ -195,18 +198,33 @@ try {
     sAdmin = s;
   }
 
-  // 6. /admin renders for the owner, with the implementation tracker
+  // 6a. B2.2: /admin serves the REACT shell to the owner. (If the EJS tracker
+  //     page shows up instead, the build is missing — that's a real failure.)
   {
     const res = await get('/admin', sAdmin);
     const html = await res.text();
-    check('admin area renders for the owner (200 + tracker)',
-      res.status === 200 && /Implementation tracker/.test(html), `got ${res.status}`);
+    check('admin area serves the React shell to the owner (200 + root element)',
+      res.status === 200 && /id="root"/.test(html), `got ${res.status}`);
   }
 
-  // 7. /admin is forbidden for a logged-in NON-owner
+  // 6b. the SPA's boot endpoint hands back its CSRF token — the source of the
+  //     X-CSRF-Token header every React POST sends (the fetch() posture)
+  {
+    const res = await get('/api/admin/boot', sAdmin);
+    const j = await res.json().catch(() => ({}));
+    check('/api/admin/boot returns isAdmin + csrfToken for the owner (200)',
+      res.status === 200 && j.isAdmin === true && typeof j.csrfToken === 'string' && j.csrfToken.length >= 32,
+      `got ${res.status}`);
+  }
+
+  // 7. /admin AND /api/admin/boot are forbidden for a logged-in NON-owner
   {
     const res = await get('/admin', sUser);
-    check('admin area is forbidden for a non-owner (403)', res.status === 403, `got ${res.status}`);
+    const boot = await get('/api/admin/boot', sUser);
+    const bootText = await boot.text();
+    check('admin area is forbidden for a non-owner (403, /admin + /api/admin/boot)',
+      res.status === 403 && boot.status === 403 && /Not admin/.test(bootText),
+      `got ${res.status}/${boot.status}`);
   }
 
   // 8–10. /admin/toggle-roadmap: the fetch()-style CSRF check (the header

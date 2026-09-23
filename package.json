@@ -1,11 +1,17 @@
 {
   "name": "my-website",
   "version": "1.0.0",
-  "description": "Simple website with user accounts and progress tracking",
+  "description": "gqsa site — comics + stories with memberships (Express + SQLite; /admin is the React SPA)",
   "main": "server.js",
   "type": "module",
+  "private": true,
+  "workspaces": [
+    "admin-frontend"
+  ],
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node server.js",
+    "build:admin": "npm run build -w admin-frontend"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
