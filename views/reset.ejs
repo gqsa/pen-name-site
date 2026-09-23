@@ -1,0 +1,25 @@
+<%- include('partials/head', { title: 'Choose a new password' }) %>
+  <div class="wrap">
+    <div class="card">
+      <h1>Choose a new password</h1>
+      <% if (typeof error !== 'undefined' && error) { %><p style="color:#e5484d;"><%= error %></p><% } %>
+      <form action="/reset-password" method="POST">
+        <!-- A1: hidden CSRF field — the anti-forgery token for THIS session -->
+        <input type="hidden" name="csrf" value="<%= csrfToken %>">
+        <!-- A3: the emailed token travels back with the form (it's the proof
+             this link was the one that was sent — single-use, 30-min life). -->
+        <input type="hidden" name="token" value="<%= token %>">
+
+        <label>New password</label>
+        <input type="password" name="password" required minlength="6" placeholder="At least 6 characters" autocomplete="new-password">
+
+        <label>Confirm new password</label>
+        <input type="password" name="password2" required minlength="6" placeholder="Same again" autocomplete="new-password">
+
+        <button type="submit">Set new password</button>
+      </form>
+
+      <p class="muted"><a href="/login">Back to login</a></p>
+    </div>
+  </div>
+<%- include('partials/footer') %>

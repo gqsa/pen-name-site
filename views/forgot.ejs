@@ -1,0 +1,21 @@
+<%- include('partials/head', { title: 'Reset password' }) %>
+  <div class="wrap">
+    <div class="card">
+      <h1>Reset your password</h1>
+      <p class="muted">Enter your username or email. If that account has an email on
+        file, a reset link goes there.</p>
+      <% if (typeof error !== 'undefined' && error) { %><p style="color:#e5484d;"><%= error %></p><% } %>
+      <form action="/forgot-password" method="POST">
+        <!-- A1: hidden CSRF field — the anti-forgery token for THIS session -->
+        <input type="hidden" name="csrf" value="<%= csrfToken %>">
+
+        <label>Username or email</label>
+        <input type="text" name="username" required placeholder="Your username or email" autocomplete="username">
+
+        <button type="submit">Send reset link</button>
+      </form>
+
+      <p class="muted"><a href="/login">Back to login</a></p>
+    </div>
+  </div>
+<%- include('partials/footer') %>

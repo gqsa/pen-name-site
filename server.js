@@ -4,6 +4,7 @@ import session from 'express-session';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import bcrypt from 'bcryptjs'; // the bcrypt algorithm in pure JS (same hashes, no native build)
+import { readFileSync, writeFileSync, rmSync } from 'node:fs'; // A3: the "file" email transport (outbox)
 // A1 (env-only secrets): load .env BEFORE paypal-config.js, because ES modules
 // run in import order and paypal-config reads process.env the moment it loads.
 import './loadEnv.js';
@@ -179,6 +180,103 @@ for (const [col, ddl] of A2_COLUMNS) {
     db.exec(`ALTER TABLE users ADD COLUMN ${col} ${ddl}`);
     console.log(`[A2] added users.${col} column`);
   }
+}
+
+// ============================================================
+// A3: ACCOUNTS & EMAIL — one email pathway for everything
+// ============================================================
+// The email is part of the ACCOUNT from day one (not an optional extra):
+// registration collects it, /settings edits it, and it's where member
+// announcements ("a new story is out!") and password-reset links arrive.
+// "No optional email" is the END state; until we have a real sending domain
+// (C1 era) a SWITCH decides how much is enforced:
+//   EMAIL_REQUIRED=false (default for now) — the field is shown + collected,
+//       but a blank email still registers.
+//   EMAIL_REQUIRED=true — registration REQUIRES a valid email.
+// Flipping the env var IS the migration (see .env.example + progress.md A3).
+//
+// THE ONE PATHWAY: every email the site sends — resets, member blasts,
+// receipts — goes through sendEmail(). The TRANSPORT is a switch too:
+//   console (default) — log the envelope to the server output. Zero setup.
+//   file              — append to a JSON outbox (EMAIL_FILE_PATH), so you can
+//       open the file and read the actual email (and the test suite can pull
+//       the reset link out of it).
+//   (C1 era)          — a real provider (Resend/SMTP) once we have a domain:
+//       add a branch here, nothing else changes.
+
+// A3: the opt-out flag — the "turn email notifications off" switch. Default
+// ON; NULL/missing counts as ON, so every pre-A3 account is still notified.
+const a3UserCols = db.prepare('PRAGMA table_info(users)').all().map(r => r.name);
+if (!a3UserCols.includes('email_notifications')) {
+  db.exec('ALTER TABLE users ADD COLUMN email_notifications INTEGER DEFAULT 1');
+  console.log('[A3] added users.email_notifications column (default ON)');
+}
+
+// A3: password-reset tokens. We store the SHA-256 of the link token, never
+// the raw token — if the DB leaks, the live links can't be read out of it.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash TEXT NOT NULL,        -- sha256(token) — the raw token never touches the DB
+    user_id INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used INTEGER DEFAULT 0
+  );
+`);
+
+// A3: the switches (env-tunable, see .env.example).
+const EMAIL_REQUIRED = (process.env.EMAIL_REQUIRED || 'false').toLowerCase() === 'true';
+const EMAIL_TRANSPORT = (process.env.EMAIL_TRANSPORT || 'console').toLowerCase(); // console | file | (provider later)
+const EMAIL_FILE_PATH = process.env.EMAIL_FILE_PATH || '.mailoutbox.json';
+const EMAIL_FROM = process.env.EMAIL_FROM || 'gqsa <hello@gqsa.site>';
+const APP_BASE_URL = (process.env.APP_URL || 'http://localhost:3000').replace(/\/+$/, '');
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const RESET_TTL_MS = 30 * 60 * 1000; // a reset link lives 30 minutes
+
+// THE ONE PATHWAY (see section header). Returns an envelope-shaped summary.
+function sendEmail({ to, subject, html }) {
+  const envelope = { from: EMAIL_FROM, to, subject, html, sent_at: Date.now(), transport: EMAIL_TRANSPORT };
+  if (EMAIL_TRANSPORT === 'file') {
+    let box = [];
+    try { box = JSON.parse(readFileSync(EMAIL_FILE_PATH, 'utf8')); } catch { box = []; }
+    box.push(envelope);
+    writeFileSync(EMAIL_FILE_PATH, JSON.stringify(box, null, 2));
+    console.log(`[A3 email] (file) to=${to} subject="${subject}" — outbox ${EMAIL_FILE_PATH}`);
+  } else {
+    console.log(`[A3 email] (console) to=${to} subject="${subject}"\n${html}`);
+  }
+  return { to, subject, transport: EMAIL_TRANSPORT };
+}
+
+// A3: member blast — "a new story is out!". Sends to every user who has an
+// email AND hasn't opted out (email_notifications !== 0). Returns the counts
+// so the admin page + tests can prove exactly who got it.
+function notifyMembers(subject, html) {
+  const eligible = db.prepare(
+    "SELECT email FROM users WHERE email IS NOT NULL AND email <> '' AND (email_notifications IS NULL OR email_notifications = 1)"
+  ).all();
+  const optedOut = db.prepare(
+    "SELECT COUNT(*) c FROM users WHERE email IS NOT NULL AND email <> '' AND email_notifications = 0"
+  ).get().c;
+  const noEmail = db.prepare("SELECT COUNT(*) c FROM users WHERE email IS NULL OR email = ''").get().c;
+  for (const r of eligible) sendEmail({ to: r.email, subject, html });
+  console.log(`[A3 blast] "${subject}" -> sent=${eligible.length} optedOut=${optedOut} noEmail=${noEmail}`);
+  return { sent: eligible.length, optedOut, noEmail };
+}
+
+// A3: reset-token helpers (raw token in the link, only its hash in the DB).
+function hashToken(token) {
+  return createHash('sha256').update(String(token)).digest('hex');
+}
+function findValidToken(token) {
+  if (!token) return null;
+  const row = db.prepare(
+    'SELECT * FROM password_reset_tokens WHERE token_hash = ? AND used = 0'
+  ).get(hashToken(token));
+  if (!row) return null;
+  if (Date.now() > row.expires_at) return null; // expired
+  return row;
 }
 
 db.exec(`
@@ -380,8 +478,8 @@ db.exec(`
     const A = [
       ['A1', 'Security hardening (bcrypt, env secrets, CSRF, login rate-limit)', 1],
       ['A2', 'Recurring payments (PayPal Subscriptions + signed webhooks)', 1],
-      ['A3', 'Password reset (email-based)', 0],
-      ['A4', 'Admin panel (members, tiers, payments)', 0],
+      ['A3', 'Accounts & email (signup email + switch, opt-out, change/reset, member announcements)', 1],
+      ['A4', 'Admin panel (tiers + payments; the member list itself = B10)', 0],
       ['A5', 'Frontend approach (EJS) — decided + adopted', 1],
     ];
     const B = [
@@ -395,6 +493,7 @@ db.exec(`
       ['B7', 'Story tier-gating (inline highlight → per-tier blur + red border)', 0],
       ['B8', 'Public display pages + member gating + copy-prevention', 0],
       ['B9', 'Storage for real members (deferred)', 0],
+      ['B10', 'Audience page (member list: active / free / cancelled + terminate membership)', 0],
     ];
     const C = [
       ['C1', 'Deploy to Hostinger / domain (deferred)', 0],
@@ -404,6 +503,30 @@ db.exec(`
     for (const [step, label, done] of B) ins.run('B', step, label, done, order++);
     for (const [step, label, done] of C) ins.run('C', step, label, done, order++);
     console.log(`[B2] seeded implementation roadmap (${order} items)`);
+  }
+  // A3: bring EXISTING roadmap tables up to date — the seed above only runs
+  // while the table is empty, so a database that predates A3 gets: (a) the
+  // refreshed A3 label + done flag (A3 is the build state as of this commit),
+  // (b) the re-scoped A4 label (the member list itself is now B10), and
+  // (c) the new B10 row. Each step is a no-op once applied (idempotent).
+  const A3_LABEL = 'Accounts & email (signup email + switch, opt-out, change/reset, member announcements)';
+  const A4_LABEL = 'Admin panel (tiers + payments; the member list itself = B10)';
+  const B10_LABEL = 'Audience page (member list: active / free / cancelled + terminate membership)';
+  const a3Row = db.prepare("SELECT label, done FROM roadmap WHERE phase = 'A' AND step = 'A3'").get();
+  if (a3Row && (a3Row.label !== A3_LABEL || !a3Row.done)) {
+    db.prepare("UPDATE roadmap SET label = ?, done = 1 WHERE phase = 'A' AND step = 'A3'").run(A3_LABEL);
+    console.log('[A3] refreshed roadmap A3 row (label + done)');
+  }
+  const a4Row = db.prepare("SELECT label FROM roadmap WHERE phase = 'A' AND step = 'A4'").get();
+  if (a4Row && a4Row.label !== A4_LABEL) {
+    db.prepare("UPDATE roadmap SET label = ? WHERE phase = 'A' AND step = 'A4'").run(A4_LABEL);
+    console.log('[A3] refreshed roadmap A4 row (label)');
+  }
+  if (!db.prepare("SELECT 1 FROM roadmap WHERE phase = 'B' AND step = 'B10'").get()) {
+    const nextOrder = db.prepare('SELECT COALESCE(MAX(sort_order), -1) + 1 AS m FROM roadmap').get().m;
+    db.prepare("INSERT INTO roadmap (phase, step, label, done, sort_order) VALUES ('B', 'B10', ?, 0, ?)")
+      .run(B10_LABEL, nextOrder);
+    console.log('[A3] added roadmap B10 row');
   }
   // Retire the old per-reader "learning progress" table (no longer used).
   db.exec('DROP TABLE IF EXISTS progress;');
@@ -462,18 +585,38 @@ app.get('/', (req, res) => {
 // A1: server-rendered now (see /login above) — the form must embed this
 // session's hidden CSRF token, which only the server can know.
 app.get('/register', (req, res) => {
-  res.render('register');
+  res.render('register', { emailRequired: EMAIL_REQUIRED });
 });
 
 // Handle registration form submission (POST request)
 app.post('/register', async (req, res) => {
   const username = req.body.username;
+  // A3: email is part of the account from day one (announcements + password
+  // resets arrive here). The field is ALWAYS shown + collected; the
+  // EMAIL_REQUIRED switch (see the A3 section header) decides whether a blank
+  // one is accepted. Invalid emails are rejected either way.
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (email && !EMAIL_RE.test(email)) {
+    return res.render('message', {
+      title: 'Email not valid', heading: "That email doesn't look right",
+      body: 'Check the address (like name@example.com) and try again.',
+      linkText: 'Try again', linkHref: '/register', tone: 'error',
+    });
+  }
+  if (EMAIL_REQUIRED && !email) {
+    return res.render('message', {
+      title: 'Email needed', heading: 'Almost — an email is required',
+      body: 'Add the email where member announcements and password-reset links arrive.',
+      linkText: 'Try again', linkHref: '/register', tone: 'error',
+    });
+  }
+
   const password = await hashPassword(req.body.password); // Hash before saving! (A1: bcrypt — slow on purpose)
 
   try {
     // Insert the new user
-    const stmt = db.prepare("INSERT INTO users (username, password) VALUES (?, ?)");
-    const result = stmt.run(username, password);
+    const stmt = db.prepare("INSERT INTO users (username, password, email) VALUES (?, ?, ?)");
+    const result = stmt.run(username, password, email || null);
     
     // Get the ID of the newly created user
     const userId = result.lastInsertRowid;
@@ -572,6 +715,111 @@ app.post('/login', loginRateLimiter, async (req, res) => {
   }
 });
 
+// ============================================================
+// A3: PASSWORD RESET (email-based) — the "I can't get in" path
+// ============================================================
+// Flow: /forgot-password (username OR email) -> sendEmail() a link
+//   /reset-password?token=<64-hex> -> /reset-password (new password) ->
+//   token marked used. Only the token's SHA-256 lives in the DB, and the
+//   token is single-use + 30-min expiry (RESET_TTL_MS).
+// SECURITY: the reset EMAIL is sent through the ONE pathway (sendEmail), so
+//   it respects the same console/file transport + opt-out rules as everything
+//   else. We look the user up by username OR email so either works.
+
+// A3: the forgot-password form (no session needed).
+app.get('/forgot-password', (req, res) => {
+  res.render('forgot', {});
+});
+
+// A3: handle the "I forgot my password" request.
+// NOTE: we always answer the same way whether or not the account exists, so
+// this endpoint can't be used to probe which usernames/emails are registered
+// (an account-enumeration oracle). The only difference is whether an email
+// actually went out.
+app.post('/forgot-password', loginRateLimiter, (req, res) => {
+  const identifier = String(req.body.username || '').trim();
+  if (!identifier) {
+    return res.render('forgot', { error: 'Enter your username or email.' });
+  }
+  // Match on username (exact) OR email (case-insensitive).
+  const user = db.prepare(
+    "SELECT * FROM users WHERE username = ? OR lower(email) = lower(?) LIMIT 1"
+  ).get(identifier, identifier);
+
+  if (user && user.email) {
+    const token = randomBytes(32).toString('hex'); // 64 hex chars, unguessable
+    const now = Date.now();
+    db.prepare(
+      'INSERT INTO password_reset_tokens (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)'
+    ).run(hashToken(token), user.id, now, now + RESET_TTL_MS);
+
+    const link = `${APP_BASE_URL}/reset-password?token=${token}`;
+    sendEmail({
+      to: user.email,
+      subject: 'Reset your gqsa password',
+      html:
+        `<p>Someone asked to reset the password for <strong>${user.username}</strong>.</p>` +
+        `<p><a href="${link}">Click here to choose a new password</a></p>` +
+        `<p>If you didn't ask for this, you can ignore this email — your password stays as it is.</p>` +
+        `<p style="opacity:0.7">This link expires in 30 minutes and works once.</p>`,
+    });
+  }
+
+  // Same message either way (no account-enumeration oracle).
+  res.render('message', {
+    title: 'Check your email', heading: 'If that account exists…',
+    body: 'If an account with that username or email has an email on file, a reset link is on its way. Check your inbox (or the server log / outbox file, depending on the transport).',
+    linkText: 'Back to login', linkHref: '/login', tone: 'success',
+  });
+});
+
+// A3: the reset form — reached by clicking the emailed link.
+// We validate the token up front so a dead link shows a clear message
+// instead of a form that would 400 on submit.
+app.get('/reset-password', (req, res) => {
+  const token = String(req.query.token || '');
+  const row = findValidToken(token);
+  if (!row) {
+    return res.render('message', {
+      title: 'Link expired', heading: 'That reset link is no longer valid',
+      body: 'Reset links expire after 30 minutes and work once. Request a fresh one.',
+      linkText: 'Request a new link', linkHref: '/forgot-password', tone: 'error',
+    });
+  }
+  res.render('reset', { token });
+});
+
+// A3: set the new password and burn the token.
+app.post('/reset-password', async (req, res) => {
+  const token = String(req.body.token || '');
+  const row = findValidToken(token);
+  if (!row) {
+    return res.render('message', {
+      title: 'Link expired', heading: 'That reset link is no longer valid',
+      body: 'Reset links expire after 30 minutes and work once. Request a fresh one.',
+      linkText: 'Request a new link', linkHref: '/forgot-password', tone: 'error',
+    });
+  }
+
+  const newPassword = String(req.body.password || '');
+  if (newPassword.length < 6) {
+    return res.render('reset', { token, error: 'Password must be at least 6 characters.' });
+  }
+  if (newPassword !== String(req.body.password2 || '')) {
+    return res.render('reset', { token, error: 'The two passwords don\'t match.' });
+  }
+
+  const hash = await hashPassword(newPassword);
+  db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hash, row.user_id);
+  db.prepare('UPDATE password_reset_tokens SET used = 1 WHERE id = ?').run(row.id); // single-use
+
+  res.render('message', {
+    title: 'Password updated', heading: 'Password updated! 🔒',
+    body: 'Your new password is set. Log in with it.',
+    linkText: 'Login now', linkHref: '/login', tone: 'success',
+  });
+});
+
 // Dashboard - only accessible if logged in
 app.get('/dashboard', (req, res) => {
   // Check if user is logged in by looking at their session
@@ -606,6 +854,86 @@ app.get('/dashboard', (req, res) => {
   });
 });
 
+// ============================================================
+// A3: SETTINGS — the account's email + the notification switch + password
+// ============================================================
+// Membership lives on the dashboard (that's money talk); /settings is
+// ACCOUNT talk: where announcements go, whether they go at all, and the
+// password itself. Both are plain session pages (login required).
+
+app.get('/settings', (req, res) => {
+  if (!req.session.userId) {
+    return res.render('message', {
+      title: 'Please login', heading: 'Please login first',
+      body: '', linkText: 'Go to Login', linkHref: '/login', tone: 'neutral',
+    });
+  }
+  const userRow = db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.userId);
+  res.render('settings', {
+    username: req.session.username,
+    email: userRow.email || '',
+    emailOn: userRow.email_notifications !== 0, // NULL/missing counts as ON
+    emailRequired: EMAIL_REQUIRED,
+    flash: null,
+    error: null,
+  });
+});
+
+app.post('/settings', (req, res) => {
+  if (!req.session.userId) return res.redirect('/login');
+  const userId = req.session.userId;
+
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (email && !EMAIL_RE.test(email)) {
+    return res.render('settings', {
+      username: req.session.username, email, emailOn: true, emailRequired: EMAIL_REQUIRED,
+      flash: null, error: "That email doesn't look right — check the address.",
+    });
+  }
+  // Checkbox pattern: a hidden 'off' default + the checkbox value 'on', so an
+  // unchecked box still arrives (as 'off') instead of being absent.
+  const notifOn = req.body.email_notifications === 'on' ? 1 : 0;
+
+  db.prepare('UPDATE users SET email = ?, email_notifications = ? WHERE id = ?')
+    .run(email || null, notifOn, userId);
+
+  const fresh = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+  res.render('settings', {
+    username: req.session.username,
+    email: fresh.email || '',
+    emailOn: fresh.email_notifications !== 0,
+    emailRequired: EMAIL_REQUIRED,
+    flash: 'Settings saved.',
+    error: null,
+  });
+});
+
+// A3: change password from inside a logged-in session (current password
+// required — the email reset link is the "I don't know it" path).
+app.post('/change-password', async (req, res) => {
+  if (!req.session.userId) return res.redirect('/login');
+  const userRow = db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.userId);
+
+  const current = String(req.body.current_password || '');
+  const next = String(req.body.new_password || '');
+  const confirm = String(req.body.confirm_password || '');
+
+  const base = {
+    username: req.session.username,
+    email: userRow.email || '',
+    emailOn: userRow.email_notifications !== 0,
+    emailRequired: EMAIL_REQUIRED,
+  };
+  const fail = (error) => res.render('settings', { ...base, flash: null, error });
+
+  if (next.length < 6) return fail('The new password must be at least 6 characters.');
+  if (next !== confirm) return fail('The two new passwords don\'t match.');
+  if (!(await bcrypt.compare(current, userRow.password))) return fail('Your current password is wrong.');
+
+  db.prepare('UPDATE users SET password = ? WHERE id = ?').run(await hashPassword(next), userRow.id);
+  res.render('settings', { ...base, flash: 'Password updated.', error: null });
+});
+
 // B2: ADMIN AREA — gated to the site owner. The creator's username (set as
 // ADMIN_USERNAME in .env) is the only admin; if that env var is empty, nobody
 // is admin. Every admin route checks isAdmin(req) first.
@@ -625,7 +953,12 @@ app.get('/admin', (req, res) => {
   const byPhase = { A: [], B: [], C: [] };
   for (const r of roadmap) (byPhase[r.phase] || (byPhase[r.phase] = [])).push(r);
   const doneCount = roadmap.filter(r => r.done).length;
-  res.render('admin', { byPhase, doneCount, total: roadmap.length, csrfToken: req.session.csrfToken });
+  res.render('admin', {
+    byPhase, doneCount, total: roadmap.length, csrfToken: req.session.csrfToken,
+    // A3: the blast panel shows WHERE the mail is going (console log vs outbox
+    // file) so the owner knows where to look after "Send".
+    emailTransport: EMAIL_TRANSPORT,
+  });
 });
 
 // Toggle a roadmap item's done flag (the check / uncheck in the tracker).
@@ -641,6 +974,27 @@ app.post('/admin/toggle-roadmap', (req, res) => {
       const next = row.done ? 0 : 1;
       db.prepare('UPDATE roadmap SET done = ? WHERE id = ?').run(next, id);
       res.json({ success: true, done: next });
+    } catch (e) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+});
+
+// A3: MEMBER BLAST — the "a new story is out!" announcement, usable today.
+// Same CSRF posture as /admin/toggle-roadmap (JSON in, X-CSRF-Token header,
+// admin-gated). Sends through notifyMembers() -> the ONE pathway. B8 will
+// add the proper "new content" button; this is the pipe + the handle tests
+// (and the admin page) use.
+app.post('/admin/notify', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  let body = '';
+  req.on('data', chunk => { body += chunk; });
+  req.on('end', () => {
+    try {
+      const { subject, html } = JSON.parse(body);
+      if (!subject || !html) return res.status(400).json({ error: 'subject + html required' });
+      const counts = notifyMembers(String(subject), String(html));
+      res.json({ success: true, ...counts });
     } catch (e) {
       res.status(400).json({ error: e.message });
     }

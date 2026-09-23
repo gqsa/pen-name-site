@@ -9,6 +9,14 @@
         <label>Username</label>
         <input type="text" name="username" required placeholder="Choose a username" autocomplete="username">
 
+        <!-- A3: email is part of the account (announcements + password resets
+             arrive here). The EMAIL_REQUIRED switch (server-side) decides whether
+             it's mandatory; the hint below tells the user why it's here. -->
+        <label>Email <% if (typeof emailRequired !== 'undefined' && emailRequired) { %><span style="color:#e5484d;">required</span><% } %></label>
+        <input type="email" name="email" placeholder="you@example.com" autocomplete="email"
+          <% if (typeof emailRequired !== 'undefined' && emailRequired) { %>required<% } %>>
+        <p class="muted" style="margin-top:2px;">Member announcements (new stories / comics) and password-reset links arrive here.</p>
+
         <label>Password</label>
         <input type="password" name="password" required placeholder="Choose a password" autocomplete="new-password">
 

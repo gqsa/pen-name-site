@@ -25,6 +25,27 @@
       <% } %>
     <% } %>
 
+    <!-- A3: MEMBER BLAST — the "a new story is out!" announcement. Sends to
+         everyone who has an email and hasn't opted out. B8 will add the proper
+         "new content" button; this is the pipe working today. -->
+    <h2>Member announcements</h2>
+    <div class="panel">
+      <p class="muted" style="margin-top:0;">Goes to every account with an email that
+        hasn't opted out (the opt-out switch lives in each account's
+        <a href="/settings">settings</a>). Currently the mail transport is
+        <strong><%= emailTransport %></strong> —
+        <% if (emailTransport === 'file') { %>check the outbox file (<code>.mailoutbox.json</code>) after sending.<% } else { %>check the server log after sending.<% } %>
+        A real sending provider slots in here in the C1 era.</p>
+      <form id="blast-form">
+        <label>Subject</label>
+        <input type="text" name="subject" placeholder="A new story is out!" required>
+        <label>Body</label>
+        <textarea name="html" rows="4" placeholder="New story: "Snowline" is live — read it on the site." required style="width:100%;"></textarea>
+        <button type="submit" style="margin-top:10px;">Send to members</button>
+        <span id="blast-result" style="margin-left:12px;"></span>
+      </form>
+    </div>
+
     <p style="margin-top:26px;"><a href="/dashboard">Dashboard</a> · <a href="/">Home</a> · <a href="/logout">Log out</a></p>
 
     <script>
@@ -38,6 +59,30 @@
         });
         console.log('Roadmap saved:', response.ok);
       }
+
+      // A3: the member blast — same fetch/CSRF posture as toggleRoadmap.
+      document.getElementById('blast-form').addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const form = event.target;
+        const result = document.getElementById('blast-result');
+        result.textContent = 'Sending…';
+        try {
+          const response = await fetch('/admin/notify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': '<%= csrfToken %>' },
+            body: JSON.stringify({ subject: form.subject.value, html: form.html.value })
+          });
+          const data = await response.json();
+          if (response.ok) {
+            result.textContent = `Sent: ${data.sent} · opted out: ${data.optedOut} · no email: ${data.noEmail}`;
+            form.reset();
+          } else {
+            result.textContent = `Error: ${data.error || response.status}`;
+          }
+        } catch (err) {
+          result.textContent = `Error: ${err.message}`;
+        }
+      });
     </script>
   </div>
 <%- include('partials/footer') %>

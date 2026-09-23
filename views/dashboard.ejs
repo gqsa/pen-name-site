@@ -3,6 +3,10 @@
     <h1>Welcome to your dashboard, <%= username %>!</h1>
     <p class="muted">This page is only visible when you're logged in.</p>
 
+    <!-- A3: account talk (email + notification switch + password) lives in its
+         own page; membership below is money talk. -->
+    <p style="margin-top:0;"><a href="/settings">Account settings (email, announcements, password) →</a></p>
+
     <% if (membershipStatus === 'active') { %>
       <p>Membership status: <strong>Member</strong> ⭐ — renews monthly<%= memberSince %></p>
     <% } else if (membershipStatus === 'suspended') { %>

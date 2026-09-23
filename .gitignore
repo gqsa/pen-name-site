@@ -15,3 +15,7 @@ npm-cache/
 
 # Environment variables (keep secrets out of git)
 .env
+
+# A3 email outbox (local inspection/test artifact of the "file" transport)
+.mailoutbox.json
+.mailoutbox-*.json
