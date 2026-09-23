@@ -5,29 +5,39 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title><%= (typeof title !== 'undefined' && title) ? title : 'gqsa' %></title>
   <style>
-    :root { --accent:#0a7d33; --bg:#fafafa; --ink:#1c1c1c; --muted:#666; --line:#e2e2e2; }
+    /* gqsa theme — red #AC2E34 on black (B1, per the creator's palette). */
+    :root {
+      --accent:#AC2E34;            /* the gqsa red */
+      --accent-soft:rgba(172,46,52,.16);
+      --bg:#0d0d0d;                /* near-black base */
+      --card:#161616;              /* raised surfaces */
+      --ink:#f2f2f2;              /* near-white text */
+      --muted:#9a9a9a;
+      --line:#2c2c2c;
+    }
     * { box-sizing: border-box; }
     body { font-family: Arial, Helvetica, sans-serif; margin:0; background:var(--bg); color:var(--ink); line-height:1.55; }
     a { color: var(--accent); text-decoration:none; }
     a:hover { text-decoration: underline; }
     .wrap { max-width: 460px; margin: 40px auto; padding: 0 16px; }
     .center { text-align: center; padding: 60px 16px; }
-    .card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:22px; box-shadow:0 1px 4px rgba(0,0,0,.06); }
-    h1 { font-size: 1.6rem; margin:.2em 0 .6em; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:22px; box-shadow:0 2px 10px rgba(0,0,0,.5); }
+    h1 { font-size: 1.6rem; margin:.2em 0 .6em; letter-spacing:.2px; }
     label { display:block; font-weight:600; margin-top:12px; }
-    input, select, textarea { display:block; width:100%; padding:10px; margin:6px 0 2px; border:1px solid #ccc; border-radius:6px; font:inherit; background:#fff; }
+    input, select, textarea { display:block; width:100%; padding:10px; margin:6px 0 2px; border:1px solid var(--line); border-radius:6px; font:inherit; background:#1a1a1a; color:var(--ink); }
+    input:focus, select:focus, textarea:focus { outline:none; border-color:var(--accent); }
     button { padding:11px 18px; background:var(--accent); color:#fff; border:none; border-radius:6px; cursor:pointer; font:inherit; font-weight:600; }
-    button:hover { filter:brightness(1.06); }
+    button:hover { filter:brightness(1.1); }
     button:disabled { opacity:.55; cursor:default; }
     .muted { color:var(--muted); }
-    .error { color:#b00020; }
-    .success { color:var(--accent); }
+    .error { color:#ff6b6b; }
+    .success { color:#4ade80; }
     .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
     .panel { border:1px solid var(--line); border-radius:8px; padding:14px; margin-top:18px; }
-    .panel--member { background:#f0fff4; border-color:#9ae6b4; }
-    .panel--warn { background:#fffaf0; border-color:#f6ad55; }
-    .btn--danger { background:#c53030; color:#fff; }
-    .btn--danger:hover { background:#a52525; }
+    .panel--member { background:var(--accent-soft); border-color:var(--accent); }
+    .panel--warn { background:#241d0e; border-color:#b8860b; }
+    .btn--danger { background:#d64545; color:#fff; }
+    .btn--danger:hover { background:#b93a3a; }
     .checklist { list-style:none; padding:0; }
     .checklist li { margin:8px 0; display:flex; align-items:center; gap:8px; }
     .checklist input[type=checkbox] { width:auto; margin:0; }

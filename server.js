@@ -113,13 +113,11 @@ app.use((req, res, next) => {
   const valid = sentBuf.length === expectedBuf.length && timingSafeEqual(sentBuf, expectedBuf);
 
   if (!valid) {
-    return res.status(403).send(`
-      <html><body style="font-family: Arial, sans-serif; text-align: center; padding-top: 80px;">
-        <h1>403 — request blocked</h1>
-        <p>Missing or invalid anti-forgery token (CSRF check failed).</p>
-        <p><a href="/">Back to home</a></p>
-      </body></html>
-    `);
+    return res.status(403).render('message', {
+      title: 'Request blocked', heading: '403 — request blocked',
+      body: 'Missing or invalid anti-forgery token (CSRF check failed).',
+      linkText: 'Back to home', linkHref: '/', tone: 'error',
+    });
   }
   next();
 });
@@ -213,6 +211,160 @@ if (PAYPAL_WEBHOOK_ID.startsWith('PASTE_')) {
 }
 if (PAYPAL_CLIENT_ID.startsWith('PASTE_')) {
   console.warn('[A2] PayPal credentials not set — the join flow will show "not set up yet" until you add them to .env.');
+}
+
+// ============================================================
+// B1: CONTENT DATABASE
+// ============================================================
+// The whole point of the gqsa site: host COMICS (images, multi-page) and
+// STORIES (text), plus single images and videos, with member-only gating.
+//
+// The model has two layers:
+//   1. A "work" — a story, a comic, an image, a video — one row each, each with
+//      title / description / publish date / free-vs-member / tier.
+//   2. A comic is special: it has PAGES in reading order, so it gets a child
+//      table (comic_pages). A story's "pages" are just its body text, so it
+//      doesn't need a child table.
+//
+// Gating (enforced in B4): is_member=0 → free (everyone). is_member=1 → members
+// only (any paying member). tier_id → which tier it belongs to. For now there's
+// ONE tier; the schema already supports many, so admin-created tiers (A4) work
+// later with no schema change.
+//
+// Everything here is idempotent: CREATE TABLE IF NOT EXISTS + a seed that only
+// runs while a table is empty, so a restart never duplicates anything.
+
+db.exec(`
+  -- The membership tiers. price is in CENTS (500 = $5.00) so we never do
+  -- floating-point money math in the DB. The real billing price lives on
+  -- PayPal's side (A2); this is the name/perks we SHOW readers.
+  CREATE TABLE IF NOT EXISTS tiers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,              -- e.g. "Patron"
+    price INTEGER NOT NULL,                 -- cents
+    currency TEXT NOT NULL DEFAULT 'USD',
+    perks TEXT,                             -- human-readable perk list
+    active INTEGER DEFAULT 1,               -- is this tier being offered?
+    created_at INTEGER
+  );
+
+  -- Stories: prose. body is the full text; description is the short blurb
+  -- shown in lists.
+  CREATE TABLE IF NOT EXISTS stories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT,                       -- blurb for lists
+    body TEXT NOT NULL,                     -- the full prose
+    publish_date INTEGER,                   -- epoch ms (when it went live)
+    is_member INTEGER DEFAULT 0,            -- 0 = free, 1 = members-only
+    tier_id INTEGER REFERENCES tiers(id),
+    created_at INTEGER,
+    updated_at INTEGER
+  );
+
+  -- Comics: the "work" row. Its pages live in comic_pages (below).
+  CREATE TABLE IF NOT EXISTS comics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT,
+    publish_date INTEGER,
+    is_member INTEGER DEFAULT 0,
+    tier_id INTEGER REFERENCES tiers(id),
+    created_at INTEGER,
+    updated_at INTEGER
+  );
+
+  -- A comic's pages, in reading order. This is the PARENT/CHILD relationship:
+  -- one comic → many pages. ON DELETE CASCADE: delete the comic, its pages go
+  -- too (no orphaned page rows). UNIQUE (comic_id, page_number): a comic can't
+  -- have two "page 1"s.
+  CREATE TABLE IF NOT EXISTS comic_pages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    comic_id INTEGER NOT NULL REFERENCES comics(id) ON DELETE CASCADE,
+    page_number INTEGER NOT NULL,
+    file_path TEXT NOT NULL,                -- where the image file lives
+    UNIQUE (comic_id, page_number)
+  );
+
+  -- Single images (art, not part of a comic).
+  CREATE TABLE IF NOT EXISTS images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    caption TEXT,
+    file_path TEXT NOT NULL,
+    publish_date INTEGER,
+    is_member INTEGER DEFAULT 0,
+    tier_id INTEGER REFERENCES tiers(id),
+    created_at INTEGER
+  );
+
+  -- Videos.
+  CREATE TABLE IF NOT EXISTS videos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT,
+    file_path TEXT NOT NULL,
+    publish_date INTEGER,
+    is_member INTEGER DEFAULT 0,
+    tier_id INTEGER REFERENCES tiers(id),
+    created_at INTEGER
+  );
+`);
+
+// B1 seed: one tier + a little sample content, ONLY while a table is empty
+// (so a restart never duplicates it). Real content arrives in B2 via uploads;
+// these rows just give the schema something real to hold and B3 something to
+// display while we build the public pages.
+{
+  const now = Date.now();
+  const tierId = db.prepare('SELECT id FROM tiers ORDER BY id LIMIT 1').get();
+
+  if (!tierId) {
+    db.prepare('INSERT INTO tiers (name, price, currency, perks, active, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('Patron', 500, 'USD', 'All exclusive comics + stories', 1, now);
+    console.log('[B1] seeded tier: Patron ($5/mo)');
+  }
+
+  const t = db.prepare('SELECT id FROM tiers ORDER BY id LIMIT 1').get().id;
+
+  if (db.prepare('SELECT COUNT(*) c FROM stories').get().c === 0) {
+    const ins = db.prepare('INSERT INTO stories (title, description, body, publish_date, is_member, tier_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+    ins.run(
+      'The Last Lighthouse',
+      'A free sample — the night the sea went wrong.',
+      'The light at Vael\'s Point had been dead for thirty years, but on the night the tide went wrong, Mara climbed the stairs anyway. She carried no lamp. She carried the reason.\n\nDown in the village they told her the sea had swallowed the lighthouse whole, that the keeper had simply stopped. But Mara had kept his last letter for a decade — the one that said: when you are ready, the light will know you. And tonight, with the water black and the wind holding its breath, she set the match to the wick and waited for the glass to remember how to burn.',
+      now, 0, null, now, now
+    );
+    ins.run(
+      'Ember & Ash',
+      'Members-only. A promise kept in a room full of ash.',
+      'They told the city it was a fire — a gas line, an accident with a number and a date. What it was, was a promise kept.\n\nKestrel had been the only one who knew the vault under the old theatre, the only one who held the key that was also a tooth. When the sirens came for the rest of them, she was already inside, turning the lock the way her mother had taught her: twice left, once right, and a knock. The door opened onto a room full of ash and one small, impossible light. She closed the door behind her. The city would burn its stories and call them news. But the key was safe, and the light was hers, and that was the whole of it.',
+      now, 1, t, now, now
+    );
+    console.log('[B1] seeded 2 sample stories (1 free, 1 member)');
+  }
+
+  if (db.prepare('SELECT COUNT(*) c FROM comics').get().c === 0) {
+    const insC = db.prepare('INSERT INTO comics (title, description, publish_date, is_member, tier_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    const insP = db.prepare('INSERT INTO comic_pages (comic_id, page_number, file_path) VALUES (?, ?, ?)');
+    const free = insC.run('Paper Moons', 'A 3-page free sample comic.', now, 0, null, now, now).lastInsertRowid;
+    for (let p = 1; p <= 3; p++) insP.run(free, p, `/uploads/comics/${free}/${p}.png`);
+    const mem = insC.run('Hollow Signal', 'Members-only comic (2 pages).', now, 1, t, now, now).lastInsertRowid;
+    for (let p = 1; p <= 2; p++) insP.run(mem, p, `/uploads/comics/${mem}/${p}.png`);
+    console.log('[B1] seeded 2 sample comics (free 3p, member 2p)');
+  }
+
+  if (db.prepare('SELECT COUNT(*) c FROM images').get().c === 0) {
+    db.prepare('INSERT INTO images (title, caption, file_path, publish_date, is_member, tier_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run('Cover art — Paper Moons', 'The free sample cover.', '/uploads/images/paper-moons-cover.png', now, 0, null, now);
+    console.log('[B1] seeded 1 sample image');
+  }
+
+  if (db.prepare('SELECT COUNT(*) c FROM videos').get().c === 0) {
+    db.prepare('INSERT INTO videos (title, description, file_path, publish_date, is_member, tier_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run('Behind the ink', 'How a page gets drawn.', '/uploads/videos/behind-the-ink.mp4', now, 0, null, now);
+    console.log('[B1] seeded 1 sample video');
+  }
 }
 
 // Helper function to hash passwords — A1: now bcrypt, not SHA-256.
@@ -459,27 +611,19 @@ app.post('/join-membership', async (req, res) => {
 
   // Already an active member? Don't start a second subscription.
   if (userRow.member === 1) {
-    return res.send(`
-      <html><body style="font-family: Arial; text-align: center; padding-top: 100px;">
-        <h1>You're already a member ⭐</h1>
-        <p><a href="/dashboard">Go to your dashboard</a></p>
-      </body></html>
-    `);
+    return res.render('message', {
+      title: 'Already a member', heading: "You're already a member ⭐",
+      body: '', linkText: 'Go to your dashboard', linkHref: '/dashboard', tone: 'success',
+    });
   }
 
   // Friendly message if the credentials haven't been pasted in yet
   if (PAYPAL_CLIENT_ID.startsWith('PASTE_')) {
-    return res.send(`
-      <html>
-        <head><title>PayPal not set up yet</title></head>
-        <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-          <h1>PayPal isn't set up yet</h1>
-          <p>Put your sandbox credentials in a local <code>.env</code> (see
-          <code>.env.example</code>), restart the server, then join.</p>
-          <p><a href="/dashboard">Back to dashboard</a></p>
-        </body>
-      </html>
-    `);
+    return res.render('message', {
+      title: 'PayPal not set up yet', heading: "PayPal isn't set up yet",
+      body: 'Put your sandbox credentials in a local <code>.env</code> (see <code>.env.example</code>), restart the server, then join.',
+      linkText: 'Back to dashboard', linkHref: '/dashboard', tone: 'neutral',
+    });
   }
 
   // Billing email: the form's value wins; fall back to the stored one.
@@ -508,27 +652,18 @@ app.post('/join-membership', async (req, res) => {
     // send the user's browser to it (the Agree & Approve step).
     const approve = (sub.links || []).find(l => l.rel === 'approve');
     if (!approve) {
-      return res.send(`
-        <html><body style="font-family: Arial; text-align: center; padding-top: 100px;">
-          <h1>Subscription created (${sub.status})</h1>
-          <p>PayPal didn't give us an approval link — check the sandbox dashboard
-          for the subscription, then refresh your dashboard here.</p>
-          <p><a href="/dashboard">Back to dashboard</a></p>
-        </body></html>
-      `);
+      return res.render('message', {
+        title: 'Subscription created', heading: `Subscription created (${sub.status})`,
+        body: "PayPal didn't give us an approval link — check the sandbox dashboard for the subscription, then refresh your dashboard here.",
+        linkText: 'Back to dashboard', linkHref: '/dashboard', tone: 'neutral',
+      });
     }
     res.redirect(approve.href);
   } catch (error) {
-    res.status(502).send(`
-      <html>
-        <head><title>Membership error</title></head>
-        <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-          <h1>Couldn't start your membership</h1>
-          <p>${error.message}</p>
-          <p><a href="/dashboard">Back to dashboard</a></p>
-        </body>
-      </html>
-    `);
+    res.status(502).render('message', {
+      title: 'Membership error', heading: "Couldn't start your membership",
+      body: error.message, linkText: 'Back to dashboard', linkHref: '/dashboard', tone: 'error',
+    });
   }
 });
 
@@ -557,16 +692,10 @@ app.get('/paypal-return', async (req, res) => {
   }
   const userRow = db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.userId);
 
-  const page = (headline, detailHtml) => res.send(`
-    <html>
-      <head><title>${headline}</title></head>
-      <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-        <h1>${headline}</h1>
-        <p>${detailHtml}</p>
-        <p><a href="/dashboard">Go to your dashboard</a></p>
-      </body>
-    </html>
-  `);
+  const page = (heading, body, tone = 'neutral') => res.render('message', {
+    title: heading, heading, body,
+    linkText: 'Go to your dashboard', linkHref: '/dashboard', tone,
+  });
 
   if (!userRow || !userRow.paypal_subscription_id) {
     return page(
@@ -593,7 +722,8 @@ app.get('/paypal-return', async (req, res) => {
       return page(
         'You are now a member! ⭐',
         'PayPal confirms your subscription is active — membership is on. ' +
-        'It renews monthly until you cancel it.'
+        'It renews monthly until you cancel it.',
+        'success'
       );
     }
 
@@ -614,16 +744,13 @@ app.get('/paypal-return', async (req, res) => {
     );
   } catch (error) {
     console.log(`[A2] return-route check FAILED: user ${userRow.id} — ${error.message}`);
-    res.status(502).send(`
-      <html>
-        <head><title>Membership check failed</title></head>
-        <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-          <h1>Couldn't confirm your membership</h1>
-          <p>${error.message}</p>
-          <p><a href="/paypal-return">Try again</a> &middot; <a href="/dashboard">Back to dashboard</a></p>
-        </body>
-      </html>
-    `);
+    res.status(502).render('message', {
+      title: 'Membership check failed', heading: "Couldn't confirm your membership",
+      body: error.message,
+      linkText: 'Try again', linkHref: '/paypal-return',
+      link2Text: 'Back to dashboard', link2Href: '/dashboard',
+      tone: 'error',
+    });
   }
 });
 
@@ -693,24 +820,19 @@ app.post('/cancel-membership', async (req, res) => {
   if (!userRow) return res.redirect('/login');
 
   if (!userRow.paypal_subscription_id) {
-    return res.send(`
-      <html><body style="font-family: Arial; text-align: center; padding-top: 100px;">
-        <h1>No subscription on file</h1>
-        <p>Your membership wasn't started through PayPal (it may predate A2).
-        Nothing to cancel on PayPal's side.</p>
-        <p><a href="/dashboard">Back to dashboard</a></p>
-      </body></html>
-    `);
+    return res.render('message', {
+      title: 'No subscription on file', heading: 'No subscription on file',
+      body: "Your membership wasn't started through PayPal (it may predate A2). Nothing to cancel on PayPal's side.",
+      linkText: 'Back to dashboard', linkHref: '/dashboard', tone: 'neutral',
+    });
   }
 
   if (PAYPAL_CLIENT_ID.startsWith('PASTE_')) {
-    return res.send(`
-      <html><body style="font-family: Arial; text-align: center; padding-top: 100px;">
-        <h1>PayPal isn't set up yet</h1>
-        <p>Add your sandbox credentials to <code>.env</code> and restart to cancel.</p>
-        <p><a href="/dashboard">Back to dashboard</a></p>
-      </body></html>
-    `);
+    return res.render('message', {
+      title: 'PayPal not set up yet', heading: "PayPal isn't set up yet",
+      body: 'Add your sandbox credentials to <code>.env</code> and restart to cancel.',
+      linkText: 'Back to dashboard', linkHref: '/dashboard', tone: 'neutral',
+    });
   }
 
   try {
@@ -723,29 +845,19 @@ app.post('/cancel-membership', async (req, res) => {
       subscriptionId: userRow.paypal_subscription_id,
     });
     console.log(`[A2] cancel confirmed: user ${userRow.id} sub ${userRow.paypal_subscription_id} -> ${JSON.stringify(outcome)}`);
-    res.send(`
-      <html>
-        <head><title>Membership cancelled</title></head>
-        <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-          <h1>Membership cancelled</h1>
-          <p>PayPal confirmed the cancellation and your membership is now off.
-          You won't be charged again.</p>
-          <p><a href="/dashboard">Back to dashboard</a></p>
-        </body>
-      </html>
-    `);
+    res.render('message', {
+      title: 'Membership cancelled', heading: 'Membership cancelled',
+      body: "PayPal confirmed the cancellation and your membership is now off. You won't be charged again.",
+      linkText: 'Back to dashboard', linkHref: '/dashboard', tone: 'success',
+    });
   } catch (error) {
     console.log(`[A2] cancel FAILED for user ${userRow.id}: ${error.message}`);
-    res.status(502).send(`
-      <html><body style="font-family: Arial; text-align: center; padding-top: 100px;">
-        <h1>Couldn't cancel on PayPal's side</h1>
-        <p>PayPal didn't accept the cancellation, so <strong>your membership is
-        still on</strong>. Details: ${error.message}</p>
-        <p>You can also cancel from your PayPal account (Subscriptions), and your
-        membership will turn off the next time we check.</p>
-        <p><a href="/dashboard">Back to dashboard</a></p>
-      </body></html>
-    `);
+    res.status(502).render('message', {
+      title: "Couldn't cancel", heading: "Couldn't cancel on PayPal's side",
+      body: "PayPal didn't accept the cancellation, so <strong>your membership is still on</strong>. Details: " +
+            error.message + ". You can also cancel from your PayPal account (Subscriptions), and your membership will turn off the next time we check.",
+      linkText: 'Back to dashboard', linkHref: '/dashboard', tone: 'error',
+    });
   }
 });
 
@@ -754,32 +866,21 @@ app.post('/cancel-membership', async (req, res) => {
 // never activated, so no webhook will ever grant membership. Pure "no worries"
 // page.
 app.get('/paypal-cancel', (req, res) => {
-  res.send(`
-    <html>
-      <head><title>Join cancelled</title></head>
-      <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-        <h1>Join cancelled</h1>
-        <p>No charge was made and nothing changed on your account
-        (and it was test mode anyway).</p>
-        <p><a href="/dashboard">Back to dashboard</a></p>
-      </body>
-    </html>
-  `);
+  res.render('message', {
+    title: 'Join cancelled', heading: 'Join cancelled',
+    body: 'No charge was made and nothing changed on your account (and it was test mode anyway).',
+    linkText: 'Back to dashboard', linkHref: '/dashboard', tone: 'neutral',
+  });
 });
 
 // Logout - clear the session
 app.get('/logout', (req, res) => {
   req.session.destroy(); // Forget who this user is
   
-  res.send(`
-    <html>
-      <head><title>Logged Out</title></head>
-      <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-        <h1>You are logged out!</h1>
-        <p><a href="/">Back to home</a></p>
-      </body>
-    </html>
-  `);
+  res.render('message', {
+    title: 'Logged Out', heading: 'You are logged out!',
+    body: '', linkText: 'Back to home', linkHref: '/', tone: 'success',
+  });
 });
 
 // Start listening on a port.

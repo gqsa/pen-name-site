@@ -5,7 +5,7 @@
 > If a fresh session opens, it should read **this file first** — everything needed to continue (context,
 > constraints, the plan, and what's done) is here. No need to re‑explain the background.
 
-**Last updated:** 2026‑09‑22 (renamed to gqsa; O4 tiers decided; **O6 decided: EJS**; A3–A5 re‑positioned; `gqsa-Site` = source of truth; **§8 main‑Site handoff instruction recorded — do not execute yet**. **A1 DONE — security hardening complete (bcrypt, env secrets, CSRF, login rate-limit; verified by test-a1-security.mjs, 10/10 PASS)**. **A2 DONE — recurring payments complete (PayPal Subscriptions + signed webhooks; the one-time Step-9 flow is REPLACED; verified by test-a2-subscriptions.mjs, 18/18 PASS offline). A2 hotfix #3 (§7c): grant now happens in `/paypal-return`, which asks PayPal's API "is this sub ACTIVE?" and applies the same idempotent `applyMembershipEvent` (sandbox webhooks keep failing signature verification; webhook stays armed for revocation + production). VERIFIED LIVE: user is Member ⭐. A2 hotfix #4 (§7d): the Cancel button was a no-op (wrong API — `DELETE` 404'd without cancelling, so a charged sub couldn't be cancelled); fixed to `POST …/cancel` (204 → CANCELLED) + membership flipped off locally + de-scared error page; VERIFIED end-to-end. NEXT: user clicks Cancel once to genuinely cancel their live sub, then B0/EJS scaffold + A3 profile.**.)
+**Last updated:** 2026‑09‑22 (renamed to gqsa; O4 tiers decided; **O6 decided: EJS**; A3–A5 re‑positioned; `gqsa-Site` = source of truth; **§8 main‑Site handoff instruction recorded — do not execute yet**. **A1 DONE — security hardening complete (bcrypt, env secrets, CSRF, login rate-limit; verified by test-a1-security.mjs, 10/10 PASS)**. **A2 DONE — recurring payments complete (PayPal Subscriptions + signed webhooks; the one-time Step-9 flow is REPLACED; verified by test-a2-subscriptions.mjs, 18/18 PASS offline). A2 hotfix #3 (§7c): grant now happens in `/paypal-return`, which asks PayPal's API "is this sub ACTIVE?" and applies the same idempotent `applyMembershipEvent` (sandbox webhooks keep failing signature verification; webhook stays armed for revocation + production). VERIFIED LIVE: user is Member ⭐. A2 hotfix #4 (§7d): the Cancel button was a no-op (wrong API — `DELETE` 404'd without cancelling, so a charged sub couldn't be cancelled); fixed to `POST …/cancel` (204 → CANCELLED) + membership flipped off locally + de-scared error page; VERIFIED end-to-end. **B0 DONE (2026‑09‑22): EJS adopted — all 5 pages + head/footer partials are `views/*.ejs`, inline HTML strings removed, every flow page shares one `message.ejs`; boots clean, all pages + membership UI verified.** **B1 DONE (2026‑09‑22): content database — 6 idempotent tables (tiers / stories / comics / comic_pages / images / videos) + one-time sample seed (1 tier "Patron", 2 stories, 2 comics, 1 image, 1 video); comic→pages parent/child with `ON DELETE CASCADE` + `UNIQUE(comic_id,page_number)`; seed idempotent (verified no-dup after a restart). Site themed red `#AC2E34` on black (shared `partials/head.ejs`).** NEXT: **B2 (admin upload area)** (+ A3 profile rides along).**.)
 
 ---
 
@@ -97,8 +97,8 @@ Status legend: `⬜ not started` · `🔵 in progress` · `✅ done` · `⏸ def
 
 | Step | Status | Notes / what we'll learn |
 |------|--------|--------------------------|
-| B0. **Scaffold new project** from `skill-site-creation.md` + bring in A1's hardened auth | ⬜ | New workspace/repo. Copy the bcrypt/env/CSRF patterns in from day one. |
-| B1. **Content database** — tables for Stories, Comics (multi‑page), Images, Videos; fields: title, description, body/pages, publish date, free‑vs‑member, tier; **plus a `tiers` table** (name, price, perks, active) | ⬜ | `gqsa site` Phase 1 step 1. Models our two funnels (comics + stories). Start with ONE hard‑coded tier for learning (C8/O4) — but the schema already supports admin‑created tiers. |
+| B0. **Scaffold new project** from `skill-site-creation.md` + bring in A1's hardened auth | ✅ (2026‑09‑22) | **DONE.** This workspace `gqsa-Site` IS the scaffold — A1‑hardened auth + A2 recurring payments already in. **EJS adopted (O6):** all 5 pages (home/login/register/dashboard/message) + 2 partials (`partials/head.ejs`, `partials/footer.ejs`) are now `views/*.ejs`; the inline HTML strings in `server.js` are gone. Every membership/flow page (register/login success‑fail, 403 CSRF, join‑/cancel‑membership, paypal‑return/cancel, logout) migrated to one shared `message.ejs` (locals are `typeof`‑guarded, so a missing optional local can't 500). Verified: boots clean, all pages render, membership UI pages render with the shared head/footer, no `undefined` locals leak. |
+| B1. **Content database** — tables for Stories, Comics (multi‑page), Images, Videos; fields: title, description, body/pages, publish date, free‑vs‑member, tier; **plus a `tiers` table** (name, price, perks, active) | ✅ (2026‑09‑22) | **DONE.** 6 tables in `server.js` (idempotent `CREATE TABLE IF NOT EXISTS`): `tiers` (name, price in **cents**, currency, perks, active), `stories` (title, description, **body** text, publish_date, is_member, tier_id), `comics` + child `comic_pages` (comic_id, page_number, **file_path**; `ON DELETE CASCADE` + `UNIQUE(comic_id,page_number)` — the parent/child relationship), `images`, `videos`. One‑time **idempotent seed** (only while a table is empty): 1 tier (Patron, $5/mo), 2 stories (1 free + 1 member), 2 comics (free 3‑page + member 2‑page), 1 image, 1 video. Verified: counts correct after boot **and after a restart** (no duplicates), cascade + unique constraints present, gated stories correct. **Theme set (O‑new):** site is now **red `#AC2E34` on black** — applied to the shared `partials/head.ejs` CSS so every page + future B3 pages inherit it. |
 | B2. **Admin upload area** (protected, only me) — add stories, upload comic pages/images/video, save metadata | ⬜ | `gqsa site` Phase 1 step 2. Teaches file upload + storing file refs in DB. |
 | B3. **Public display pages** — Home/latest, Stories list + story page, Comics list + page reader, Image gallery, Video page | ⬜ | `gqsa site` Phase 1 step 3. The storefront that replaces the Pixiv/AO3 landing. |
 | B4. **Member‑only gating** — reuse sessions + membership flag; some items free, some members‑only | ⬜ | `gqsa site` Phase 1 step 4. Replaces "share a gated Google Doc." |
@@ -158,16 +158,17 @@ These don't block planning, but they **will** change scope. Mark them when decid
 
 1. ~~**A1 — Security hardening** (bcrypt + env secrets + CSRF)~~ — **DONE** (2026‑09‑21).
 2. ~~**A2 — Recurring payments** (PayPal Subscriptions + webhooks)~~ — **DONE** (2026‑09‑21).
-3. **B0 — Adopt the gqsa site scaffold** (workspace `gqsa-Site` already holds the starting code — `npm install`, first boot, confirm A1's patterns are in place).
-4. **Frontend: EJS (O6 decided)** — set up `ejs` + a `views/` folder during B0, and write every page as an EJS template from then on. *Decided 2026‑09‑21. React/Vue is out of scope for this site by design (§8).*
-5. **B1 → B2 → B3 → B4** — content DB, uploads, display, gating (the core "it works" loop), pages written in the chosen approach.
-6. **B5, B6** — reading experience + progress tracking (polish readers feel).
-7. **B7 — wire recurring membership** end‑to‑end.
-8. **B8** — copy‑prevention (layman standard) · **B9** — real storage (only when real members arrive).
-9. **C1+** — Hostinger/domain/CDN/DB upgrades **when we're ready to leave the free tier.**
+3. ~~**B0 — Adopt the gqsa site scaffold**~~ — **DONE** (2026‑09‑22). Workspace `gqsa-Site` holds the A1‑hardened + A2 code; first boot confirmed healthy.
+4. ~~**Frontend: EJS (O6 decided)**~~ — **DONE** (2026‑09‑22, during B0). `ejs` installed; every page is now a `views/*.ejs` template (5 pages + `partials/head.ejs` + `partials/footer.ejs`); all flow pages share one `message.ejs`. *React/Vue stays out of scope for this site by design (§8).*
+5. ~~**B1 — Content database** (Stories/Comics+pages/Images/Videos + `tiers`)~~ — **DONE** (2026‑09‑22). 6 idempotent tables + one‑time sample seed; comic→pages parent/child with cascade; **site themed red `#AC2E34` on black**.
+6. **B2 → B3 → B4** — **NEXT:** admin uploads (B2), public display pages (B3), member‑only gating (B4) — the core "it works" loop, pages as EJS templates in the red/black theme.
+7. **B5, B6** — reading experience + progress tracking (polish readers feel).
+8. **B7 — wire recurring membership** end‑to‑end.
+9. **B8** — copy‑prevention (layman standard) · **B9** — real storage (only when real members arrive).
+10. **C1+** — Hostinger/domain/CDN/DB upgrades **when we're ready to leave the free tier.**
 
-> **We are NOT touching Hostinger (C1).** A1 + A2 are done — the next build step is **B0**
-> (scaffold + EJS setup), then B1 onward. A3–A5 will ride along with Phase B as noted above.
+> **We are NOT touching Hostinger (C1).** A1 + A2 + B0 (scaffold + EJS) + B1 (content DB + red/black theme) are done —
+> the next build step is **B2 (admin upload area)**, then B3 → B4. A3–A5 will ride along with Phase B as noted above.
 
 ---
 
