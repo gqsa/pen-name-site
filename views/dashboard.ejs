@@ -1,0 +1,83 @@
+<%- include('partials/head', { title: 'Dashboard' }) %>
+  <div class="wrap" style="max-width:640px;">
+    <h1>Welcome to your dashboard, <%= username %>!</h1>
+    <p class="muted">This page is only visible when you're logged in.</p>
+
+    <% if (membershipStatus === 'active') { %>
+      <p>Membership status: <strong>Member</strong> ⭐ — renews monthly<%= memberSince %></p>
+    <% } else if (membershipStatus === 'suspended') { %>
+      <p style="color:#b45309;">Membership status: <strong>SUSPENDED</strong> — a payment failed. Fix it in your PayPal account to restore access.</p>
+    <% } else if (membershipStatus === 'cancelled') { %>
+      <p>Membership status: <strong>Cancelled</strong> — join again any time.</p>
+    <% } else { %>
+      <p>Membership status: <strong>Free</strong></p>
+    <% } %>
+
+    <h2>Your learning progress</h2>
+    <ul class="checklist">
+      <% for (const item of items) { %>
+        <li>
+          <input type="checkbox" id="item-<%= item.id %>" data-id="<%= item.id %>"
+            <% if (item.completed) { %>checked<% } %>
+            onchange="toggleItem(<%= item.id %>, this.checked)">
+          <label for="item-<%= item.id %>" style="margin:0;"><%= item.item %></label>
+        </li>
+      <% } %>
+    </ul>
+
+    <% if (isMember) { %>
+      <div class="panel panel--member">
+        <h3 style="margin-top:0;">Members' Club ⭐</h3>
+        <p>This box is only visible to members. Welcome to the club!</p>
+      </div>
+    <% } %>
+
+    <% if (membershipStatus === 'active') { %>
+      <div class="panel panel--member">
+        <h3 style="margin-top:0;">Your membership ⭐</h3>
+        <p><%= subscriptionPrice %> <%= subscriptionCurrency %>/month, renews automatically. Cancel any time.</p>
+        <form action="/cancel-membership" method="POST" onsubmit="return confirm('Cancel your membership? Access ends as soon as PayPal confirms.');">
+          <input type="hidden" name="csrf" value="<%= csrfToken %>">
+          <button type="submit" class="btn--danger">Cancel membership</button>
+        </form>
+      </div>
+    <% } else if (membershipStatus === 'suspended') { %>
+      <div class="panel panel--warn">
+        <h3 style="margin-top:0;">Your membership is suspended ⚠️</h3>
+        <p>A payment failed, so PayPal paused billing. Fix the payment from your PayPal account and the REINSTATED webhook will restore your access.</p>
+        <p>If you'd rather not continue:</p>
+        <form action="/cancel-membership" method="POST" onsubmit="return confirm('Cancel your membership?');">
+          <input type="hidden" name="csrf" value="<%= csrfToken %>">
+          <button type="submit" class="btn--danger">Cancel membership</button>
+        </form>
+      </div>
+    <% } else { %>
+      <div class="panel">
+        <h3 style="margin-top:0;">Join the membership</h3>
+        <p><%= subscriptionPrice %> <%= subscriptionCurrency %>/month — renews automatically, cancel any time.
+        (PayPal sandbox: no real money is charged.)</p>
+        <form action="/join-membership" method="POST">
+          <input type="hidden" name="csrf" value="<%= csrfToken %>">
+          <label>Billing email (optional)</label>
+          <input type="email" name="email" value="<%= billingEmail %>" placeholder="you@example.com">
+          <button type="submit" style="margin-top:10px;">Join membership</button>
+        </form>
+      </div>
+    <% } %>
+
+    <p><a href="/logout">Log out</a></p>
+
+    <script>
+      // Save progress when a checkbox is clicked. fetch() isn't a form, so the
+      // CSRF token travels in a header (X-CSRF-Token), not a hidden field.
+      async function toggleItem(id, completed) {
+        const response = await fetch('/save-progress', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': '<%= csrfToken %>' },
+          body: JSON.stringify({ id: id, completed: completed ? 1 : 0 })
+        });
+        console.log('Saved:', response.ok);
+      }
+    </script>
+  </div>
+<%- include('partials/footer') %>

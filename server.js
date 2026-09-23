@@ -372,149 +372,34 @@ app.get('/dashboard', (req, res) => {
   // Check if user is logged in by looking at their session
   if (!req.session.userId) {
     // Not logged in — send them to login page
-    res.send(`
-      <html>
-        <head><title>Please Login</title></head>
-        <body style="font-family: Arial; text-align: center; padding-top: 100px;">
-          <h1>Please login first</h1>
-          <p><a href="/login">Go to Login</a></p>
-        </body>
-      </html>
-    `);
-    return; // Stop here, don't show dashboard
+    return res.render('message', {
+      title: 'Please Login', heading: 'Please login first',
+      body: '', linkText: 'Go to Login', linkHref: '/login', tone: 'neutral',
+    });
   }
 
-  // User is logged in — load their progress from database
-  const stmt = db.prepare("SELECT * FROM progress WHERE user_id = ? ORDER BY id");
-  const items = stmt.all(req.session.userId);
-
-  let checklistHTML = '';
-  for (const item of items) {
-    const checked = item.completed ? 'checked' : '';
-    checklistHTML += `
-      <li>
-        <input type="checkbox" id="item-${item.id}" data-id="${item.id}" ${checked} onchange="toggleItem(${item.id}, this.checked)">
-        <label for="item-${item.id}">${item.item}</label>
-      </li>
-    `;
-  }
-
-  // A2: load this user's FULL membership state from the database.
-  // The session only stores userId/username, so we look up the fresh value here.
+  // User is logged in — load their progress + fresh membership state, then let
+  // views/dashboard.ejs do the conditional rendering (status line, member box,
+  // membership panel). The server still DECIDES membership; the template only
+  // displays what we hand it.
+  const items = db.prepare("SELECT * FROM progress WHERE user_id = ? ORDER BY id").all(req.session.userId);
   const userRow = db.prepare("SELECT * FROM users WHERE id = ?").get(req.session.userId);
   const isMember = userRow && userRow.member === 1;
   const membershipStatus = userRow?.membership_status || 'free'; // free | active | suspended | cancelled
-
-  // A line showing the current state — the recurring model has more states
-  // than the old "free / member", and we show each one honestly.
   const memberSince = userRow.member_since
     ? ` (since ${new Date(userRow.member_since).toLocaleDateString()})`
     : '';
-  const statusLine = {
-    active:    `<p>Membership status: <strong>Member</strong> ⭐ — renews monthly${memberSince}</p>`,
-    suspended: `<p style="color:#b45309;">Membership status: <strong>SUSPENDED</strong> — a payment failed. Fix it in your PayPal account to restore access.</p>`,
-    cancelled: `<p>Membership status: <strong>Cancelled</strong> — join again any time.</p>`,
-    free:      `<p>Membership status: <strong>Free</strong></p>`,
-  }[membershipStatus] || '<p>Membership status: <strong>Free</strong></p>';
 
-  // Member-only content — the SERVER decides whether to send it,
-  // based on the stored flag. Free users never receive this HTML at all.
-  let memberOnlyHTML = '';
-  if (isMember) {
-    memberOnlyHTML = `
-      <div style="background:#f0fff4; border:1px solid #9ae6b4; padding:12px; border-radius:6px; margin-top:20px;">
-        <h3 style="margin-top:0;">Members' Club ⭐</h3>
-        <p>This box is only visible to members. Welcome to the club!</p>
-      </div>
-    `;
-  }
-
-  // A2: the membership panel — replaces the old one-time "$1.00" button.
-  // Three shapes, one rule: this panel only STARTS or STOPS the process.
-  // Granting and revoking access is ALWAYS done by the signed webhook,
-  // never by a page the user can close or ignore.
-  let membershipHTML = '';
-  if (membershipStatus === 'active') {
-    membershipHTML = `
-      <div style="border:1px solid #9ae6b4; background:#f0fff4; border-radius:6px; padding:14px; margin-top:20px;">
-        <h3 style="margin-top:0;">Your membership ⭐</h3>
-        <p>${SUBSCRIPTION_PRICE} ${SUBSCRIPTION_CURRENCY}/month, renews automatically. Cancel any time.</p>
-        <form action="/cancel-membership" method="POST" onsubmit="return confirm('Cancel your membership? Access ends as soon as PayPal confirms.');">
-          <input type="hidden" name="csrf" value="${res.locals.csrfToken}">
-          <button type="submit" style="padding:8px 16px; cursor:pointer; background:#c53030; color:white; border:none; border-radius:4px;">Cancel membership</button>
-        </form>
-      </div>
-    `;
-  } else if (membershipStatus === 'suspended') {
-    membershipHTML = `
-      <div style="border:1px solid #f6ad55; background:#fffaf0; border-radius:6px; padding:14px; margin-top:20px;">
-        <h3 style="margin-top:0;">Your membership is suspended ⚠️</h3>
-        <p>A payment failed, so PayPal paused billing. Fix the payment from your
-        PayPal account and the REINSTATED webhook will restore your access.</p>
-        <p>If you'd rather not continue:</p>
-        <form action="/cancel-membership" method="POST" onsubmit="return confirm('Cancel your membership?');">
-          <input type="hidden" name="csrf" value="${res.locals.csrfToken}">
-          <button type="submit" style="padding:8px 16px; cursor:pointer; background:#c53030; color:white; border:none; border-radius:4px;">Cancel membership</button>
-        </form>
-      </div>
-    `;
-  } else {
-    // free (or cancelled) -> the join panel
-    membershipHTML = `
-      <div style="border:1px solid #ccc; border-radius:6px; padding:14px; margin-top:20px;">
-        <h3 style="margin-top:0;">Join the membership</h3>
-        <p>${SUBSCRIPTION_PRICE} ${SUBSCRIPTION_CURRENCY}/month — renews automatically, cancel any time.
-        (PayPal sandbox: no real money is charged.)</p>
-        <form action="/join-membership" method="POST">
-          <input type="hidden" name="csrf" value="${res.locals.csrfToken}">
-          <label>Billing email (optional):
-            <input type="email" name="email" value="${userRow.email || ''}" placeholder="you@example.com" style="padding:6px;">
-          </label><br>
-          <button type="submit" style="padding:8px 16px; cursor:pointer; margin-top:6px;">Join membership</button>
-        </form>
-      </div>
-    `;
-  }
-
-  // User is logged in — show their dashboard!
-  res.send(`
-    <html>
-      <head><title>Dashboard</title></head>
-      <body style="font-family: Arial; max-width: 600px; margin: 50px auto;">
-        <h1>Welcome to your Dashboard, ${req.session.username}!</h1>
-        <p>This page is only visible when you're logged in.</p>
-
-        ${statusLine}
-
-        <h2>Your Learning Progress</h2>
-        <ul style="list-style-type: none; padding: 0;">
-          ${checklistHTML}
-        </ul>
-
-        ${memberOnlyHTML}
-        ${membershipHTML}
-
-        <p><a href="/logout">Logout</a></p>
-
-        <script>
-          // Save progress when checkbox is clicked
-          async function toggleItem(id, completed) {
-            const response = await fetch('/save-progress', {
-              method: 'POST',
-              // A1: fetch() calls aren't forms, so the CSRF token travels in a
-              // HEADER (X-CSRF-Token) instead of a hidden form field.
-              headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-Token': '${res.locals.csrfToken}'
-              },
-              body: JSON.stringify({id: id, completed: completed ? 1 : 0})
-            });
-            console.log('Saved:', response.ok);
-          }
-        </script>
-      </body>
-    </html>
-  `);
+  res.render('dashboard', {
+    username: req.session.username,
+    items,
+    isMember,
+    membershipStatus,
+    memberSince,
+    billingEmail: userRow.email || '',
+    subscriptionPrice: SUBSCRIPTION_PRICE,
+    subscriptionCurrency: SUBSCRIPTION_CURRENCY,
+  });
 });
 
 // API endpoint to save progress item
