@@ -27,3 +27,7 @@ paypal-skill.md
 # B2.2: the built admin SPA (built by `npm run build:admin`; Render gets the
 # build step in B2.10 — last resort if it struggles: commit dist)
 admin-frontend/dist/
+
+# B2.4: upload artifacts (binary content, regenerable — Render's free-tier disk
+# is wiped on every restart per C3, and we re-upload test content each time)
+public/uploads/

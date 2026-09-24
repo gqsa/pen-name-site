@@ -2,9 +2,10 @@
 import express from 'express';
 import session from 'express-session';
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual, randomUUID } from 'node:crypto';
 import bcrypt from 'bcryptjs'; // the bcrypt algorithm in pure JS (same hashes, no native build)
-import { readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs'; // A3: the "file" email transport (outbox); B2.2: existsSync for the admin-frontend dist check
+import { readFileSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs'; // A3: the "file" email transport (outbox); B2.2: existsSync for the admin-frontend dist check; B2.4: mkdirSync for upload dirs
+import multer from 'multer'; // B2.4: multipart uploads for the admin editors
 // A1 (env-only secrets): load .env BEFORE paypal-config.js, because ES modules
 // run in import order and paypal-config reads process.env the moment it loads.
 import './loadEnv.js';
@@ -414,6 +415,23 @@ db.exec(`
   );
 `);
 
+// B2.4: the editors need per-page and per-video captions (Step 2) and, to
+// mirror the stories/comics pattern, updated_at on images + videos (Step 6 —
+// B1's schema omitted it on those two). node:sqlite's ALTER TABLE ADD COLUMN
+// has no IF NOT EXISTS, so we guard with PRAGMA table_info — a no-op on any DB
+// that already has the column, idempotent across fresh + restarted boots.
+// (images already had caption from B1.) Each migration carries its declared
+// TYPE: captions are TEXT, updated_at is INTEGER — the same type as the
+// stories/comics columns, so a value stored through the editors round-trips as
+// a number on all four tables (SQLite's TEXT affinity would have coerced the
+// epoch-ms into a string on store).
+for (const [table, col, type] of [
+  ['comic_pages', 'caption', 'TEXT'], ['videos', 'caption', 'TEXT'],
+  ['images', 'updated_at', 'INTEGER'], ['videos', 'updated_at', 'INTEGER']]) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(r => r.name);
+  if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+}
+
 // B1 seed: one tier + a little sample content, ONLY while a table is empty
 // (so a restart never duplicates it). Real content arrives via the admin
 // upload routes (B2.4); these rows give the schema something real to hold
@@ -471,7 +489,7 @@ db.exec(`
 }
 
 // B2 seed: the implementation roadmap (only while empty — idempotent). The done
-// flags reflect the build state: A1/A2/A3/A5 + B0/B1/B2 + B2.1–B2.3 are done,
+// flags reflect the build state: A1/A2/A3/A5 + B0/B1/B2 + B2.1–B2.4 are done,
 // the rest pending.
 // B2.2: the B2.x sub-steps (the React admin build) are seeded BETWEEN B2 and
 // B4 — a table that predates them gets them from the missing-step pass below.
@@ -479,7 +497,7 @@ const B2X_ROWS = [
   ['B2.1', 'Admin area: admin account boot-seed (survives Render wipes)', 1],
   ['B2.2', 'Scaffold admin-frontend (Vite + React) + Express serves it at /admin', 1],
   ['B2.3', 'Tracker (checklist) in React', 1],
-  ['B2.4', 'Content JSON API + uploads (multer)', 0],
+  ['B2.4', 'Content JSON API + uploads (multer)', 1],
   ['B2.5', 'Comic editor in React (upload, reorder, captions, live preview, auto-save)', 0],
   ['B2.6', 'Story editor in React (upload / paste, auto-save)', 0],
   ['B2.7', 'Image / video upload editor in React', 0],
@@ -1107,6 +1125,303 @@ app.post('/admin/notify', (req, res) => {
       res.status(400).json({ error: e.message });
     }
   });
+});
+
+// B2.4: uploads land under public/uploads/{kind}/{uuid}/ — served for free by the
+// existing express.static('public'). The DB stores the URL-style path /uploads/{kind}/{uuid}/{name}.
+// The whole location lives in these two consts (C3/O3: swap for object storage at B9 —
+// the upload route is the only code that touches the filesystem here).
+const publicRoot = path.join(__dirname, 'public');
+const uploadRoot = path.join(publicRoot, 'uploads');
+const uploader = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      // `kind` arrives as a regular multipart field. GOTCHA: multer walks the
+      // stream in order, so `kind` must be appended BEFORE the file field by
+      // the client — a `kind` after the file would not be in req.body yet when
+      // this runs and the dir would fall back to 'misc'. comics|images|videos, else 'misc'.
+      const kind = ['comics', 'images', 'videos'].includes(req.body?.kind) ? req.body.kind : 'misc';
+      const dir = path.join(uploadRoot, kind, randomUUID());
+      mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => cb(null, file.originalname.replace(/[/\\]/g, '_')),
+  }),
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
+});
+
+// B2.4: multipart upload. CSRF token arrives via the X-CSRF-Token header (urlencoded does not
+// parse multipart, so req.body.csrf is empty here — the global middleware already checks the header).
+app.post('/api/admin/upload', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  uploader.single('file')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    const f = req.file;
+    if (!f) return res.status(400).json({ error: 'No file field "file" in the multipart body' });
+    // Relative to the STATIC ROOT (public/), not a fixed slice(-N) — that breaks
+    // when the checkout path depth changes: /uploads/{kind}/{uuid}/{name}, which
+    // express.static('public') serves for free.
+    const urlPath = '/' + path.relative(publicRoot, f.path).split(path.sep).join('/');
+    res.json({ success: true, file_path: urlPath, originalName: f.originalname, bytes: f.size });
+  });
+});
+
+// B2.4: manual JSON body parse (the house pattern — express.json is deliberately NOT
+// registered, see the /admin/toggle-roadmap + /admin/notify comments). A global
+// express.json() would consume the stream BEFORE those two manual parsers run and
+// silently break them. Returns a Promise<object> ({} for an empty body).
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => { try { resolve(body ? JSON.parse(body) : {}); } catch (e) { reject(e); } });
+    req.on('error', reject);
+  });
+}
+
+// B2.4: the editors' data source — every content row + counts, in one read.
+// GET → CSRF-exempt (the middleware checks POST only); the admin gate is the door.
+app.get('/api/admin/content', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  const stories = db.prepare('SELECT * FROM stories ORDER BY id').all();
+  const comics = db.prepare('SELECT * FROM comics ORDER BY id').all();
+  const pages = db.prepare('SELECT * FROM comic_pages ORDER BY comic_id, page_number').all();
+  const images = db.prepare('SELECT * FROM images ORDER BY id').all();
+  const videos = db.prepare('SELECT * FROM videos ORDER BY id').all();
+  res.json({
+    stories, comics, pages, images, videos,
+    counts: { stories: stories.length, comics: comics.length,
+              pages: pages.length, images: images.length, videos: videos.length },
+  });
+});
+
+// B2.4: stories CRUD — the single-text entity (the simplest of the editors' backends).
+// All admin-gated + readJsonBody. PUT semantics: fields absent from the payload
+// (or explicitly null, for description) keep the row's current value; tier_id CAN
+// be explicitly cleared with null (the `=== undefined` check). publish_date = epoch ms.
+app.post('/api/admin/stories', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  try {
+    const { title, description, body, publish_date, is_member, tier_id } = await readJsonBody(req);
+    if (!title || !body) return res.status(400).json({ error: 'title + body required' });
+    const now = Date.now();
+    const r = db.prepare('INSERT INTO stories (title, description, body, publish_date, is_member, tier_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)')
+      .run(String(title), description ?? null, String(body), publish_date ?? now, is_member ? 1 : 0, tier_id ?? null, now, now);
+    res.status(201).json({ success: true, id: Number(r.lastInsertRowid) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.put('/api/admin/stories/:id', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  const id = Number(req.params.id);
+  const row = db.prepare('SELECT * FROM stories WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  try {
+    const b = await readJsonBody(req);
+    db.prepare('UPDATE stories SET title=?, description=?, body=?, publish_date=?, is_member=?, tier_id=?, updated_at=? WHERE id=?')
+      .run(b.title ?? row.title, b.description ?? row.description, b.body ?? row.body,
+           b.publish_date ?? row.publish_date, (b.is_member ?? row.is_member) ? 1 : 0,
+           b.tier_id === undefined ? row.tier_id : b.tier_id, Date.now(), id);
+    res.json({ success: true, id });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.delete('/api/admin/stories/:id', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  const r = db.prepare('DELETE FROM stories WHERE id = ?').run(Number(req.params.id));
+  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
+// B2.4: comics + comic_pages CRUD — the parent/child entity. Comics OWN their
+// pages: ON DELETE CASCADE actually fires here (node:sqlite runs with
+// foreign_keys ON — verified empirically: deleting a comic deletes its pages),
+// so a plain DELETE is enough. page_number = display order; UNIQUE(comic_id,
+// page_number) means renumbering must avoid temporary collisions (the reorder
+// below is two-phase for exactly that reason).
+app.post('/api/admin/comics', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  try {
+    const { title, description, publish_date, is_member, tier_id } = await readJsonBody(req);
+    if (!title) return res.status(400).json({ error: 'title required' });
+    const now = Date.now();
+    const r = db.prepare('INSERT INTO comics (title, description, publish_date, is_member, tier_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?)')
+      .run(String(title), description ?? null, publish_date ?? now, is_member ? 1 : 0, tier_id ?? null, now, now);
+    res.status(201).json({ success: true, id: Number(r.lastInsertRowid) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.delete('/api/admin/comics/:id', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  const r = db.prepare('DELETE FROM comics WHERE id = ?').run(Number(req.params.id));
+  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true }); // its pages are gone with it (ON DELETE CASCADE)
+});
+
+app.post('/api/admin/comic-pages', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  try {
+    const { comic_id, page_number, file_path, caption } = await readJsonBody(req);
+    if (!comic_id || !Number.isInteger(page_number) || page_number < 1 || !file_path)
+      return res.status(400).json({ error: 'comic_id + integer page_number (>= 1) + file_path required' });
+    if (!db.prepare('SELECT id FROM comics WHERE id = ?').get(Number(comic_id)))
+      return res.status(404).json({ error: 'Comic not found' });
+    const r = db.prepare('INSERT INTO comic_pages (comic_id, page_number, file_path, caption) VALUES (?,?,?,?)')
+      .run(Number(comic_id), page_number, String(file_path), caption ?? null);
+    res.status(201).json({ success: true, id: Number(r.lastInsertRowid) });
+  } catch (e) {
+    if (/UNIQUE constraint failed/.test(e.message))
+      return res.status(409).json({ error: 'A page with that number already exists for this comic' });
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.patch('/api/admin/comic-pages/:id', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  const id = Number(req.params.id);
+  const row = db.prepare('SELECT * FROM comic_pages WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  try {
+    const b = await readJsonBody(req);
+    db.prepare('UPDATE comic_pages SET page_number=?, caption=?, file_path=? WHERE id=?')
+      .run(b.page_number ?? row.page_number,
+           b.caption === undefined ? row.caption : b.caption, // explicit null CLEARS the caption
+           b.file_path ?? row.file_path, id);
+    res.json({ success: true, id });
+  } catch (e) {
+    if (/UNIQUE constraint failed/.test(e.message))
+      return res.status(409).json({ error: 'A page with that number already exists for this comic' });
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete('/api/admin/comic-pages/:id', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  const r = db.prepare('DELETE FROM comic_pages WHERE id = ?').run(Number(req.params.id));
+  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
+// B2.4: reorder = renumber. CONTRACT: page_ids must be EXACTLY the comic's
+// current page set — all of them, in the new order (the editor sends the full
+// list on every drag; a partial list is rejected, not silently patched).
+// TWO-PHASE renumber (temp range first, then 1..N): a naive in-place renumber
+// collides with UNIQUE(comic_id,page_number) the moment a page moves onto a
+// number another page still holds. One transaction — node:sqlite is
+// synchronous, so the plain loops are atomic inside it.
+app.patch('/api/admin/comics/:id/reorder', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  const comicId = Number(req.params.id);
+  const comic = db.prepare('SELECT id FROM comics WHERE id = ?').get(comicId);
+  if (!comic) return res.status(404).json({ error: 'Not found' });
+  try {
+    const { page_ids } = await readJsonBody(req);
+    if (!Array.isArray(page_ids) || page_ids.length === 0 || !page_ids.every((x) => Number.isInteger(x)))
+      return res.status(400).json({ error: 'page_ids must be a non-empty array of page ids' });
+    const current = db.prepare('SELECT id FROM comic_pages WHERE comic_id = ?').all(comicId).map((r) => r.id);
+    const want = new Set(page_ids);
+    if (want.size !== page_ids.length || current.length !== page_ids.length || !current.every((x) => want.has(x)))
+      return res.status(400).json({ error: 'page_ids must be EXACTLY the comic\'s current page set (all of them, in the new order)' });
+    db.exec('BEGIN');
+    try {
+      const BASE = 1000000; // temp range that can't collide with real page numbers
+      for (let i = 0; i < page_ids.length; i++) {
+        db.prepare('UPDATE comic_pages SET page_number = ? WHERE id = ?').run(BASE + i, page_ids[i]);
+      }
+      for (let i = 0; i < page_ids.length; i++) {
+        db.prepare('UPDATE comic_pages SET page_number = ? WHERE id = ?').run(i + 1, page_ids[i]);
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+    res.json({ success: true, comic_id: comicId, order: page_ids });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// B2.4: images + videos CRUD — the two single-media entities, mirroring the
+// stories pattern (Step 4): PUT merge is `??`-based (absent fields keep the
+// row's value), `caption` CAN be cleared with an explicit null (the
+// `=== undefined` check), `description` (videos) keeps the Step 4 semantics,
+// and `file_path` is NOT NULL so it can never be cleared. `file_path` values
+// come from the Step 1 upload response. (updated_at on these two tables was
+// added by the Step 6 guard in the caption-migration loop above.)
+app.post('/api/admin/images', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  try {
+    const { title, caption, file_path, publish_date, is_member, tier_id } = await readJsonBody(req);
+    if (!title || !file_path) return res.status(400).json({ error: 'title + file_path required' });
+    const now = Date.now();
+    const r = db.prepare('INSERT INTO images (title, caption, file_path, publish_date, is_member, tier_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)')
+      .run(String(title), caption ?? null, String(file_path), publish_date ?? now, is_member ? 1 : 0, tier_id ?? null, now, now);
+    res.status(201).json({ success: true, id: Number(r.lastInsertRowid) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.put('/api/admin/images/:id', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  const id = Number(req.params.id);
+  const row = db.prepare('SELECT * FROM images WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  try {
+    const b = await readJsonBody(req);
+    db.prepare('UPDATE images SET title=?, caption=?, file_path=?, publish_date=?, is_member=?, tier_id=?, updated_at=? WHERE id=?')
+      .run(b.title ?? row.title,
+           b.caption === undefined ? row.caption : b.caption, // explicit null CLEARS the caption
+           b.file_path ?? row.file_path,
+           b.publish_date ?? row.publish_date,
+           (b.is_member ?? row.is_member) ? 1 : 0,
+           b.tier_id === undefined ? row.tier_id : b.tier_id,
+           Date.now(), id);
+    res.json({ success: true, id });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.delete('/api/admin/images/:id', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  const r = db.prepare('DELETE FROM images WHERE id = ?').run(Number(req.params.id));
+  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
+});
+
+app.post('/api/admin/videos', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  try {
+    const { title, description, caption, file_path, publish_date, is_member, tier_id } = await readJsonBody(req);
+    if (!title || !file_path) return res.status(400).json({ error: 'title + file_path required' });
+    const now = Date.now();
+    const r = db.prepare('INSERT INTO videos (title, description, caption, file_path, publish_date, is_member, tier_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(String(title), description ?? null, caption ?? null, String(file_path), publish_date ?? now, is_member ? 1 : 0, tier_id ?? null, now, now);
+    res.status(201).json({ success: true, id: Number(r.lastInsertRowid) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.put('/api/admin/videos/:id', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  const id = Number(req.params.id);
+  const row = db.prepare('SELECT * FROM videos WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  try {
+    const b = await readJsonBody(req);
+    db.prepare('UPDATE videos SET title=?, description=?, caption=?, file_path=?, publish_date=?, is_member=?, tier_id=?, updated_at=? WHERE id=?')
+      .run(b.title ?? row.title,
+           b.description ?? row.description, // Step 4 semantics: absent/null keeps the current value
+           b.caption === undefined ? row.caption : b.caption, // explicit null CLEARS the caption
+           b.file_path ?? row.file_path,
+           b.publish_date ?? row.publish_date,
+           (b.is_member ?? row.is_member) ? 1 : 0,
+           b.tier_id === undefined ? row.tier_id : b.tier_id,
+           Date.now(), id);
+    res.json({ success: true, id });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.delete('/api/admin/videos/:id', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  const r = db.prepare('DELETE FROM videos WHERE id = ?').run(Number(req.params.id));
+  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ success: true });
 });
 
 // B2.2: the built SPA's assets (Vite base '/admin/' → /admin/assets/…).
