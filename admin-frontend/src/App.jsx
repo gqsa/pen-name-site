@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import Tracker from './Tracker.jsx'
+import StoryEditor from './StoryEditor.jsx'
 import ComicEditor from './ComicEditor.jsx'
 
 // B2.2 — the admin shell.
@@ -83,6 +84,7 @@ export default function App() {
           B2.5–B2.7, the announcements panel in B2.9.
         </p>
         <Tracker csrfToken={state.csrfToken} />
+        <StoryEditor csrfToken={state.csrfToken} />
         <p style={{ marginTop: '26px' }}>
           <a href="/dashboard">Dashboard</a> · <a href="/">Home</a> · <a href="/logout">Log out</a>
         </p>
