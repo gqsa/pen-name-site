@@ -11,6 +11,11 @@
   --line: #2c2c2c;
 }
 * { box-sizing: border-box; }
+/* The `hidden` attribute must actually hide: the global element rules below
+   (input { display: block }) are AUTHOR styles and outrank the UA's
+   [hidden] { display: none } — without this guard a `hidden` file input
+   (B2.5 dropzone's picker) renders as a visible "Choose files" control. */
+[hidden] { display: none !important; }
 body { font-family: Arial, Helvetica, sans-serif; margin: 0; background: var(--bg); color: var(--ink); line-height: 1.55; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
@@ -37,3 +42,28 @@ button:disabled { opacity: .55; cursor: default; }
 .checklist { list-style: none; padding: 0; }
 .checklist li { margin: 8px 0; display: flex; align-items: center; gap: 8px; }
 .checklist input[type=checkbox] { width: auto; margin: 0; }
+
+/* B2.5 — the comic editor: a wider split-view container than the 780px `.wrap`
+   (the editor renders as a sibling of `.wrap`, so it isn't clamped to 780px). */
+.comic-editor { max-width: 1100px; margin: 40px auto; padding: 0 16px; }
+.comic-split { display: flex; gap: 24px; align-items: flex-start; }
+.comic-split > * { flex: 1; min-width: 0; }
+
+/* Left pane — the compact page list (thumbnails). */
+.page-list { list-style: none; padding: 0; margin: 0; }
+.page-row { margin: 0 0 12px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+.page-caption { margin: 0 0 8px; font-weight: 600; }
+.page-thumb { display: block; max-width: 100%; max-height: 120px; width: auto; height: auto; object-fit: contain; background: #000; border-radius: 4px; }
+
+/* Right pane — the reading preview (larger; caption sits ABOVE the image). */
+.preview-figure { margin: 0 0 20px; }
+.preview-thumb { display: block; max-width: 100%; max-height: 420px; width: auto; height: auto; object-fit: contain; background: #000; border-radius: 4px; }
+
+/* Step 2 — the live dropzone (drag / paste / double-click picker).
+   Base shape from the Step-1 stub; the states below make the three input
+   paths legible: hover hints "clickable", --active = a drag is over it,
+   --busy = the upload pipeline is running. */
+.dropzone { border: 2px dashed var(--line); border-radius: 8px; padding: 18px; margin-top: 14px; text-align: center; cursor: pointer; user-select: none; transition: border-color .15s, background .15s; }
+.dropzone:hover { border-color: var(--accent); }
+.dropzone--active { border-color: var(--accent); background: var(--accent-soft); }
+.dropzone--busy { cursor: wait; opacity: .75; }

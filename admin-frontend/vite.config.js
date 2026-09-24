@@ -42,6 +42,11 @@ export default defineConfig({
       '/admin/toggle-roadmap': EXPRESS,
       '/admin/notify': EXPRESS,
       '/api': EXPRESS,
+      // B2.5 Step 2: uploaded content (comic pages / images / videos) is served
+      // by Express from public/uploads — the SPA references those files as
+      // /uploads/… in <img src>, so dev must proxy them or every thumbnail is
+      // broken in :5173 (prod is fine: Express serves them same-origin).
+      '/uploads': EXPRESS,
     },
   },
 })

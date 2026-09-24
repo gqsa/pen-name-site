@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import Tracker from './Tracker.jsx'
+import ComicEditor from './ComicEditor.jsx'
 
 // B2.2 — the admin shell.
 //
@@ -69,18 +70,24 @@ export default function App() {
   }
 
   // status === 'ok' — the shell is live and the CSRF token is in hand.
+  // The tracker lives in the 780px `.wrap` column; the comic editor is a SIBLING
+  // of `.wrap` so it can use its own wider container (`.comic-editor`) for the
+  // split view. Visually it still sits directly below the tracker.
   return (
-    <div className="wrap">
-      <h1>Admin — gqsa</h1>
-      <p className="muted">
-        Site owner only. The implementation tracker below is the single source of
-        truth for what's built. The comic / story / media editors land in
-        B2.5–B2.7, the announcements panel in B2.9.
-      </p>
-      <Tracker csrfToken={state.csrfToken} />
-      <p style={{ marginTop: '26px' }}>
-        <a href="/dashboard">Dashboard</a> · <a href="/">Home</a> · <a href="/logout">Log out</a>
-      </p>
-    </div>
+    <>
+      <div className="wrap">
+        <h1>Admin — gqsa</h1>
+        <p className="muted">
+          Site owner only. The implementation tracker below is the single source of
+          truth for what's built. The comic / story / media editors land in
+          B2.5–B2.7, the announcements panel in B2.9.
+        </p>
+        <Tracker csrfToken={state.csrfToken} />
+        <p style={{ marginTop: '26px' }}>
+          <a href="/dashboard">Dashboard</a> · <a href="/">Home</a> · <a href="/logout">Log out</a>
+        </p>
+      </div>
+      <ComicEditor csrfToken={state.csrfToken} />
+    </>
   )
 }
