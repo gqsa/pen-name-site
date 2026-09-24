@@ -1,21 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-// B2.5 — Step 2: the comic editor — shell + DROPZONE + upload pipeline.
+// B2.5 — the comic editor — shell + dropzone/upload + drag-reorder + caption auto-save.
 //
-// What this step adds on top of the Step-1 shell (read-only list/preview):
-//   • A dropzone at the top of the left pane with THREE input paths:
+// Built up over the B2.5 steps on the Step-1 shell (read-only list/preview):
+//   • Step 2 — a dropzone at the top of the left pane with THREE input paths:
 //       drag/drop a batch of images · single-click = paste from the
 //       clipboard · double-click = the OS file picker.
 //       (A double-click also fires TWO click events, so a single click is
 //       deferred behind a 250 ms timer the double-click cancels.)
-//   • The upload pipeline: each image → POST /api/admin/upload (multipart,
+//     The upload pipeline: each image → POST /api/admin/upload (multipart,
 //     `kind` BEFORE `file`, NO Content-Type header) → POST
 //     /api/admin/comic-pages { comic_id, page_number = max+1, file_path }
 //     — sequential (multer is single-file), optimistic local append so the
 //     list + preview update immediately, stop + error line on any failure.
+//   • Step 3 — native HTML5 drag-reorder on the page rows (drop on a row =
+//     that position, drop on the list body = last), applied optimistically
+//     and persisted via PATCH /api/admin/comics/:id/reorder (full exact
+//     page set), rolled back on failure.
+//   • Step 4 — a caption input above each page thumbnail; every change
+//     debounces (~600 ms, per page id) into ONE
+//     PATCH /api/admin/comic-pages/:id { caption } — blank → null (an
+//     explicit null CLEARS the server-side caption), no save button by design.
 //
-// Still NOT here (next steps): drag-reorder (Step 3), caption inputs +
-// auto-save (Step 4). Keep the state shape stable.
+// Still NOT here: B4 marquee / crop selection (a later step).
+// Keep the state shape stable.
 //
 // Data (B2.4 contract — pinned, don't re-derive):
 //   • GET /api/admin/content  (GET = CSRF-exempt, no token needed)
@@ -25,6 +33,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 //   • POST /api/admin/comics       { title }  (JSON + X-CSRF-Token) → 201 { success, id }
 //   • POST /api/admin/upload       multipart kind='comics' + file      → { success, file_path, … }
 //   • POST /api/admin/comic-pages  { comic_id, page_number, file_path } → 201 { success, id }
+//   • PATCH /api/admin/comics/:id/reorder  { page_ids: [idA, idB, …] }  → { success, … }
+//     CONTRACT: page_ids must be EXACTLY the comic's current full page set, in
+//     the new order — a partial or duplicate list is a 400 (never a silent
+//     patch). The server does the two-phase renumber; we just send the ids.
+//   • PATCH /api/admin/comic-pages/:id  { caption }  → { success, id }
+//     Caption semantics: an explicit null CLEARS the caption; '' would store
+//     an empty string — so the editor maps blank → null.
 //
 // Layout note: the shell's `.wrap` column is 780px — too narrow for a two-column
 // split view. This component therefore renders as a SIBLING of `.wrap` (see the
@@ -53,6 +68,7 @@ async function uploadImage(file, csrfToken) {
   const res = await fetch('/api/admin/upload', {
     method: 'POST',
     headers: { 'X-CSRF-Token': csrfToken },
+    body: fd,   // the multipart body itself — without this the request goes out empty → 400 "No file field"
   })
   if (!res.ok) {
     const data = await res.json().catch(() => ({}))
@@ -83,8 +99,26 @@ export default function ComicEditor({ csrfToken }) {
   // ref read is always current, so two quick drops can't start two pipelines.
   const uploadingRef = useRef(false)
 
+  // Step 3 — drag-reorder state.
+  const [draggingId, setDraggingId] = useState(null)   // the row being dragged (opacity cue)
+  const [dragOverId, setDragOverId] = useState(null)   // the row a drop would land on (indicator)
+  const [reordering, setReordering] = useState(false)  // "Reordering…" cue near the Pages heading
+  const reorderingRef = useRef(false)                   // authoritative in-flight guard (ref = always current)
+  const dragIdRef = useRef(null)                        // the dragged page id (ref = stable across renders)
+
+  // Step 4 — caption auto-save state.
+  const captionTimers = useRef({})                       // page id → pending debounce timeout (per page, so one page's timer can't clobber another's)
+  const [captionSave, setCaptionSave] = useState(null)   // null | 'saving' | 'saved' | 'error'
+  const [captionError, setCaptionError] = useState(null) // the message behind an 'error' status
+
   // Clear the deferred single-click timer if the component unmounts early.
   useEffect(() => () => { if (clickTimer.current) clearTimeout(clickTimer.current) }, [])
+
+  // Clear any pending caption-save timers on unmount (they'd fire into the void).
+  useEffect(() => () => {
+    const timers = captionTimers.current
+    Object.keys(timers).forEach(k => { clearTimeout(timers[k]); delete timers[k] })
+  }, [])
 
   const load = useCallback(async () => {
     setError(null)
@@ -238,7 +272,7 @@ export default function ComicEditor({ csrfToken }) {
       }
       if (files.length === 0) {
         setNotice(null)
-        setError('No image on the clipboard — copy an image first, or drag one in / double-click to pick files.')
+        setError('No image on the clipboard — copy an image first, then Ctrl+V in the editor, or drag one in / double-click to pick files.')
         return
       }
       await addFiles(files)
@@ -247,6 +281,46 @@ export default function ComicEditor({ csrfToken }) {
       setError('Couldn’t read the clipboard (permission denied or empty) — drag the images in, or double-click the dropzone to pick files.')
     }
   }, [selectedId, addFiles])
+
+  // Paste (Ctrl+V / right-click → Paste) — the RELIABLE clipboard path.
+  //
+  // The async `navigator.clipboard.read()` used by click-to-paste (doPaste)
+  // does NOT surface images copied from the OS — e.g. an image FILE copied in
+  // File Explorer. It resolves with zero image items, which is why that path
+  // can report "No image on the clipboard" even though one is on the
+  // clipboard. The DOM `paste` event's `clipboardData.items` DOES expose them
+  // (each item's `getAsFile()`), so this is the primary paste path.
+  //
+  // Attached to `document` (not the section): the dropzone is a plain <div>,
+  // so clicking it leaves focus on <body> — a section-scoped onPaste would
+  // never see a subsequent Ctrl+V. Document-level catches it no matter where
+  // focus is. Text pastes (e.g. into a caption input) are left alone: we only
+  // act when the paste actually carries an image file, otherwise we return
+  // without preventDefault so the default paste proceeds.
+  const onPasteEvent = useCallback((e) => {
+    if (selectedId === null) return
+    if (uploadingRef.current) return
+    const items = (e.clipboardData && e.clipboardData.items)
+      ? Array.from(e.clipboardData.items)
+      : []
+    const files = []
+    for (let i = 0; i < items.length; i += 1) {
+      const it = items[i]
+      if (it.kind !== 'file') continue
+      const f = (typeof it.getAsFile === 'function') ? it.getAsFile() : null
+      if (f && (f.type || '').startsWith('image/')) files.push(f)
+    }
+    if (files.length === 0) return   // not an image paste → let it through (caption text, etc.)
+    e.preventDefault()
+    addFiles(files)
+  }, [selectedId, addFiles])
+
+  // Register the document-level paste listener (re-attaches when the deps
+  // change; the disposer removes it on unmount).
+  useEffect(() => {
+    document.addEventListener('paste', onPasteEvent)
+    return () => document.removeEventListener('paste', onPasteEvent)
+  }, [onPasteEvent])
 
   // Single click: defer behind a timer; a double-click cancels it and opens
   // the picker instead. (A double-click also fires two `click` events — the
@@ -288,6 +362,174 @@ export default function ComicEditor({ csrfToken }) {
     if (files.length) addFiles(files)
   }, [addFiles])
 
+  // --- Step 3: drag-reorder ----------------------------------------------------
+  //
+  // Native HTML5 DnD (no dependency). Each left-pane row is draggable:
+  //   • dragstart on a row records the dragged id,
+  //   • drop ON A ROW → the dragged page lands at that row's position,
+  //   • drop ON THE LIST (a row gap / the list body) → it lands last,
+  //   • dragend (any drop, or Escape) just clears the drag styling.
+  // The new order is applied OPTIMISTICALLY (renumbered 1..n locally) and
+  // persisted with the B2.4 reorder endpoint — which demands the FULL exact
+  // page set — then rolled back + error line on failure. "Reorder doubles as
+  // planning": the owner arranges pages here before they're published.
+  //
+  // Note for Step 4: the caption inputs will live INSIDE these draggable rows —
+  // onRowDragStart already refuses to start a drag from any interactive
+  // element, so typing/drag-selecting inside the input won't lift the row.
+
+  const clearDrag = useCallback(() => {
+    dragIdRef.current = null
+    setDraggingId(null)
+    setDragOverId(null)
+  }, [])
+
+  const onRowDragStart = useCallback((e, page) => {
+    if (reorderingRef.current) { e.preventDefault(); return }
+    // Never lift the row when the drag started inside an interactive child
+    // (forward-compat with Step 4's caption inputs).
+    if (e.target && e.target.closest && e.target.closest('input, textarea, button, a, select')) {
+      e.preventDefault()
+      return
+    }
+    dragIdRef.current = page.id
+    setDraggingId(page.id)
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move'
+      // Firefox will not start a drag at all unless something is set on the
+      // transfer — the value itself is ignored (we track the id in a ref).
+      e.dataTransfer.setData('text/plain', String(page.id))
+    }
+  }, [])
+
+  // Shared by rows AND the list: allow the drop, and set the drop-target
+  // indicator to the hovered row (data-page-id) — or clear it when hovering
+  // the list body (gap = the page will land last).
+  const onRowDragOver = useCallback((e) => {
+    if (dragIdRef.current === null) return   // not our drag (e.g. a file drag)
+    e.preventDefault()                        // REQUIRED for the drop to be allowed
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+    const el = e.currentTarget
+    setDragOverId(el && el.tagName === 'LI' && el.dataset.pageId ? Number(el.dataset.pageId) : null)
+  }, [])
+
+  const onRowDragLeave = useCallback((e) => {
+    // dragleave fires when the pointer moves onto a child — ignore that.
+    if (e.relatedTarget && e.currentTarget.contains(e.relatedTarget)) return
+    setDragOverId(null)
+  }, [])
+
+  // The ONE place a new order is computed + persisted. `next` must be the
+  // comic's COMPLETE page set in the new order (the server 400s a partial list).
+  const reorder = useCallback(async (next) => {
+    if (selectedId === null) return
+    if (reorderingRef.current) return
+    const newOrder = next.map(p => p.id)
+    const currentOrder = selectedPages.map(p => p.id)
+    // No-op guard: same length + same sequence = nothing to persist.
+    if (newOrder.length !== currentOrder.length || currentOrder.every((id, i) => id === newOrder[i])) return
+    const prevPages = pages                     // the rollback snapshot (pre-optimistic)
+    // Optimistic apply: renumber this comic's pages 1..n in the new order.
+    // The rest of `pages` (other comics) is untouched.
+    const renumbered = next.map((p, i) => ({ ...p, page_number: i + 1 }))
+    const others = prevPages.filter(p => p.comic_id !== selectedId)
+    setPages([...others, ...renumbered])
+    reorderingRef.current = true
+    setReordering(true)
+    setError(null)
+    try {
+      const res = await fetch(`/api/admin/comics/${selectedId}/reorder`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ page_ids: newOrder }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `reorder answered ${res.status}`)
+      }
+      setNotice('Pages reordered.')
+    } catch (err) {
+      setPages(prevPages)                       // roll the optimistic order back
+      setError(err.message)
+    } finally {
+      reorderingRef.current = false
+      setReordering(false)
+    }
+  }, [selectedId, selectedPages, pages, csrfToken])
+
+  const onRowDrop = useCallback((e, page) => {
+    e.preventDefault()
+    e.stopPropagation()                          // keep the list-level handler out
+    const draggedId = dragIdRef.current
+    clearDrag()
+    if (draggedId === null || reorderingRef.current) return
+    if (draggedId === page.id) return            // dropped on itself = no change
+    const dragged = selectedPages.find(p => p.id === draggedId)
+    if (!dragged) return
+    const without = selectedPages.filter(p => p.id !== draggedId)
+    const idx = without.findIndex(p => p.id === page.id)
+    reorder([...without.slice(0, idx), dragged, ...without.slice(idx)])
+  }, [selectedPages, clearDrag, reorder])
+
+  // Drop on the list body / a row gap → the page lands LAST.
+  const onListDrop = useCallback((e) => {
+    e.preventDefault()
+    const draggedId = dragIdRef.current
+    clearDrag()
+    if (draggedId === null || reorderingRef.current) return
+    const dragged = selectedPages.find(p => p.id === draggedId)
+    if (!dragged) return
+    if (selectedPages.length && selectedPages[selectedPages.length - 1].id === draggedId) return
+    const without = selectedPages.filter(p => p.id !== draggedId)
+    reorder([...without, dragged])
+  }, [selectedPages, clearDrag, reorder])
+
+  // --- Step 4: caption auto-save ------------------------------------------------
+  //
+  // The input is controlled directly by the page's caption (value =
+  // caption ?? ''), so typing updates the local state + the preview
+  // immediately. A per-page-id debounce (~600 ms) then fires ONE PATCH per
+  // edit burst — no save button by design. Blank maps to null (an explicit
+  // null CLEARS the server-side caption; '' would store an empty string).
+  // On failure the typed value stays (no rollback) and the status line
+  // reports the error.
+
+  const saveCaption = useCallback(async (pageId, value) => {
+    const next = value.trim() === '' ? null : value
+    setCaptionSave('saving')
+    setCaptionError(null)
+    try {
+      const res = await fetch(`/api/admin/comic-pages/${pageId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ caption: next }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `save caption answered ${res.status}`)
+      }
+      setCaptionSave('saved')
+    } catch (err) {
+      setCaptionSave('error')
+      setCaptionError(err.message)
+    }
+  }, [csrfToken])
+
+  const onCaptionChange = useCallback((page, value) => {
+    const next = value.trim() === '' ? null : value
+    const current = page.caption ?? null
+    // Update the local state instantly (input + preview are driven by it).
+    setPages(prev => prev.map(p => (p.id === page.id ? { ...p, caption: next } : p)))
+    if (next === current) return   // nothing changed → nothing to persist
+    if (captionSave === 'error') setCaptionSave(null)  // re-typing clears the stale error status
+    const timers = captionTimers.current
+    if (timers[page.id]) { clearTimeout(timers[page.id]); delete timers[page.id] }
+    timers[page.id] = setTimeout(() => {
+      delete timers[page.id]
+      saveCaption(page.id, value)
+    }, 600)
+  }, [saveCaption, captionSave])
+
   // --- Loading / error (before the first fetch lands) -------------------------
   if (comics === null) {
     if (error) {
@@ -317,9 +559,10 @@ export default function ComicEditor({ csrfToken }) {
       <h2>Comic editor</h2>
       <p className="muted">
         Split view — pick or create a comic on the left, add its pages with the
-        dropzone (drag a batch · click to paste · double-click to pick files),
-        watch the live preview on the right. Drag-reorder and caption auto-save
-        land in the next B2.5 steps.
+        dropzone (drag a batch · Ctrl+V / click to paste · double-click to pick files),
+        drag a page row to reorder (it persists), type a caption above a page
+        (it auto-saves — no save button), and watch the live preview on the
+        right (captions show above each image, as they'll display).
       </p>
 
       {error && (
@@ -372,13 +615,13 @@ export default function ComicEditor({ csrfToken }) {
             onDrop={onZoneDrop}
             onClick={onZoneClick}
             onDoubleClick={onZoneDoubleClick}
-            title="Click to paste from the clipboard · double-click to pick files · or drag a batch of images in"
+            title="Ctrl+V (or click) to paste from the clipboard · double-click to pick files · or drag a batch of images in"
           >
             {uploading ? (
               <span>{uploadMsg || 'Uploading…'}</span>
             ) : (
               <span className="muted">
-                Drop a batch of images here · click to paste · double-click to pick files
+                Drop a batch of images here · Ctrl+V or click to paste · double-click to pick files
               </span>
             )}
           </div>
@@ -395,15 +638,53 @@ export default function ComicEditor({ csrfToken }) {
             Pages
             {selectedComic ? <span> — {selectedComic.title}</span> : null}
             <span className="muted" style={{ fontWeight: 400 }}> ({selectedPages.length})</span>
+            {reordering ? <span className="muted" style={{ fontWeight: 400 }}> — reordering…</span> : null}
+            {captionSave === 'saving' ? <span className="muted" style={{ fontWeight: 400 }}> — saving caption…</span> : null}
+            {captionSave === 'saved' ? <span className="muted" style={{ fontWeight: 400 }}> — caption saved</span> : null}
+            {captionSave === 'error' ? <span style={{ fontWeight: 400 }}> — caption save failed</span> : null}
           </h3>
+          {captionSave === 'error' && captionError ? (
+            <p className="error" style={{ marginTop: '4px' }}>{captionError}</p>
+          ) : null}
 
           {selectedPages.length === 0 ? (
             <p className="muted">No pages yet.</p>
           ) : (
-            <ul className="page-list">
+            /* Step 3 — the list is itself a drop target (gap drop = last);
+               each row is draggable (row drop = land at that row's position). */
+            <ul
+              className="page-list"
+              onDragOver={onRowDragOver}
+              onDrop={onListDrop}
+            >
               {selectedPages.map(p => (
-                <li key={p.id} className="page-row">
-                  {p.caption ? <p className="page-caption">{p.caption}</p> : null}
+                <li
+                  key={p.id}
+                  data-page-id={p.id}
+                  className={
+                    'page-row'
+                    + (draggingId === p.id ? ' page-row--dragging' : '')
+                    + (dragOverId === p.id && draggingId !== null && draggingId !== p.id ? ' page-row--drop-target' : '')
+                  }
+                  draggable
+                  title="Drag to reorder"
+                  onDragStart={e => onRowDragStart(e, p)}
+                  onDragEnd={clearDrag}
+                  onDragOver={onRowDragOver}
+                  onDragLeave={onRowDragLeave}
+                  onDrop={e => onRowDrop(e, p)}
+                >
+                  {/* Step 4 — editable caption above the thumbnail; auto-saves (debounced).
+                      The row is draggable, but onRowDragStart refuses to lift a drag
+                      that starts inside this input (see the Step-3 guard). */}
+                  <input
+                    type="text"
+                    className="caption-input"
+                    value={p.caption ?? ''}
+                    placeholder="Caption…"
+                    aria-label={`Caption for page ${p.page_number}`}
+                    onChange={e => onCaptionChange(p, e.target.value)}
+                  />
                   <img className="page-thumb" src={p.file_path} alt={`Page ${p.page_number}`} />
                   <span className="muted" style={{ marginTop: '6px', display: 'block' }}>Page {p.page_number}</span>
                 </li>

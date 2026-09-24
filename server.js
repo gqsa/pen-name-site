@@ -498,7 +498,7 @@ const B2X_ROWS = [
   ['B2.2', 'Scaffold admin-frontend (Vite + React) + Express serves it at /admin', 1],
   ['B2.3', 'Tracker (checklist) in React', 1],
   ['B2.4', 'Content JSON API + uploads (multer)', 1],
-  ['B2.5', 'Comic editor in React (upload, reorder, captions, live preview, auto-save)', 0],
+  ['B2.5', 'Comic editor in React (upload, reorder, captions, live preview, auto-save)', 1],
   ['B2.6', 'Story editor in React (upload / paste, auto-save)', 0],
   ['B2.7', 'Image / video upload editor in React', 0],
   ['B2.8', 'Multi-editor + minimise-all', 0],

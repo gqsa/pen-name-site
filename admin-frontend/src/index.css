@@ -55,6 +55,11 @@ button:disabled { opacity: .55; cursor: default; }
 .page-caption { margin: 0 0 8px; font-weight: 600; }
 .page-thumb { display: block; max-width: 100%; max-height: 120px; width: auto; height: auto; object-fit: contain; background: #000; border-radius: 4px; }
 
+/* Step 4 — the editable caption input above each left-pane thumbnail.
+   The global `input` rule already gives width/padding; this just sets the
+   spacing to the thumbnail + a hint that it auto-saves. */
+.caption-input { margin: 0 0 8px; font-size: .95rem; }
+
 /* Right pane — the reading preview (larger; caption sits ABOVE the image). */
 .preview-figure { margin: 0 0 20px; }
 .preview-thumb { display: block; max-width: 100%; max-height: 420px; width: auto; height: auto; object-fit: contain; background: #000; border-radius: 4px; }
@@ -67,3 +72,9 @@ button:disabled { opacity: .55; cursor: default; }
 .dropzone:hover { border-color: var(--accent); }
 .dropzone--active { border-color: var(--accent); background: var(--accent-soft); }
 .dropzone--busy { cursor: wait; opacity: .75; }
+
+/* Step 3 — drag-reorder affordances on the page rows (native HTML5 DnD). */
+.page-row { cursor: grab; }
+.page-row:active { cursor: grabbing; }
+.page-row--dragging { opacity: .45; }
+.page-row--drop-target { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
