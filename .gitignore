@@ -16,9 +16,13 @@ npm-cache/
 # Environment variables (keep secrets out of git)
 .env
 
-# Personal notes — workspace-only, NOT part of the site (user's call, 2026-09-23)
+# Progress files — workspace-only, NOT part of the site (user's call, 2026-09-23; RULE
+# 2026-09-24: ALL of these stay out of git — progress.md itself, every step-breakdown
+# handoff trail (b2-4.md, b2-5.md, …), and any NEW ones created in future).
+# `b[0-9]*.md` future-proofs the breakdown files so they can't be re-added by accident.
 progress.md
 paypal-skill.md
+b[0-9]*.md
 
 # A3 email outbox (local inspection/test artifact of the "file" transport)
 .mailoutbox.json
