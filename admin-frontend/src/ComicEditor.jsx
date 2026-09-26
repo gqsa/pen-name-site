@@ -745,10 +745,18 @@ export default function ComicEditor({ csrfToken }) {
               type="button"
               className={'preview-toggle' + (previewMode === 'active' ? ' preview-toggle--on' : '')}
               aria-pressed={previewMode === 'active'}
-              title="Toggle the preview: all pages (scrollable) vs the active page only"
-              onClick={() => setPreviewMode(m => (m === 'all' ? 'active' : 'all'))}
+              title="Show only the active page (off = all pages, scrollable)"
+              onClick={() => {
+                const next = previewMode === 'all' ? 'active' : 'all'
+                // Coming back to ALL pages: keep the active page in focus — the
+                // post-render effect (deps include previewMode) centres it once
+                // every figure is back in the window. Without this flag the
+                // window would reopen at the top (page 1).
+                if (next === 'all') scrollActiveRef.current = true
+                setPreviewMode(next)
+              }}
             >
-              {previewMode === 'active' ? 'active page only' : 'all pages'}
+              active page only
             </button>
           </h3>
           {selectedPages.length === 0 ? (
