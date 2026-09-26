@@ -27,6 +27,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 //     two-way sync (row click → active + centred in the window; figure
 //     click → active + row highlighted) and an all/active toggle
 //     (`previewMode` 'all' | 'active', default 'all').
+//   • Step 8 — the caption editor MOVED into the preview: the (unchanged)
+//     Step-4 caption input now sits above the ACTIVE page's image, centred at
+//     the image's width (the figure is fit-content, so input + image share one
+//     width), with the save cues; the left-pane rows lost their caption bars
+//     (thumbnail + "Page N" only). The debounce / PATCH / save-state code is
+//     the SAME Step-4 code — moved, not rewritten.
 //
 // Still NOT here: B4 marquee / crop selection (a later step).
 // Keep the state shape stable.
@@ -422,9 +428,9 @@ export default function ComicEditor({ csrfToken }) {
   // page set — then rolled back + error line on failure. "Reorder doubles as
   // planning": the owner arranges pages here before they're published.
   //
-  // Note for Step 4: the caption inputs will live INSIDE these draggable rows —
-  // onRowDragStart already refuses to start a drag from any interactive
-  // element, so typing/drag-selecting inside the input won't lift the row.
+  // Forward-compat: onRowDragStart refuses to start a drag from any
+  // interactive child element — so a control inside a row (a caption input
+  // before Step 8, any future one) can be used without lifting the row.
 
   const clearDrag = useCallback(() => {
     dragIdRef.current = null
@@ -435,7 +441,7 @@ export default function ComicEditor({ csrfToken }) {
   const onRowDragStart = useCallback((e, page) => {
     if (reorderingRef.current) { e.preventDefault(); return }
     // Never lift the row when the drag started inside an interactive child
-    // (forward-compat with Step 4's caption inputs).
+    // (a control inside the row must not start a page drag).
     if (e.target && e.target.closest && e.target.closest('input, textarea, button, a, select')) {
       e.preventDefault()
       return
@@ -608,9 +614,8 @@ export default function ComicEditor({ csrfToken }) {
       <p className="muted">
         Split view — pick or create a comic on the left, add its pages with the
         dropzone (drag a batch · Ctrl+V / click to paste · double-click to pick files),
-        drag a page row to reorder (it persists), type a caption above a page
-        (it auto-saves — no save button), and watch the live preview on the
-        right (captions show above each image, as they'll display).
+        drag a page to reorder (it persists), and edit the active page's caption
+        above its image in the preview (it auto-saves — no save button).
       </p>
 
       {error && (
@@ -687,13 +692,7 @@ export default function ComicEditor({ csrfToken }) {
             {selectedComic ? <span> — {selectedComic.title}</span> : null}
             <span className="muted" style={{ fontWeight: 400 }}> ({selectedPages.length})</span>
             {reordering ? <span className="muted" style={{ fontWeight: 400 }}> — reordering…</span> : null}
-            {captionSave === 'saving' ? <span className="muted" style={{ fontWeight: 400 }}> — saving caption…</span> : null}
-            {captionSave === 'saved' ? <span className="muted" style={{ fontWeight: 400 }}> — caption saved</span> : null}
-            {captionSave === 'error' ? <span style={{ fontWeight: 400 }}> — caption save failed</span> : null}
           </h3>
-          {captionSave === 'error' && captionError ? (
-            <p className="error" style={{ marginTop: '4px' }}>{captionError}</p>
-          ) : null}
 
           {selectedPages.length === 0 ? (
             <p className="muted">No pages yet.</p>
@@ -724,17 +723,8 @@ export default function ComicEditor({ csrfToken }) {
                   onDragLeave={onRowDragLeave}
                   onDrop={e => onRowDrop(e, p)}
                 >
-                  {/* Step 4 — editable caption above the thumbnail; auto-saves (debounced).
-                      The row is draggable, but onRowDragStart refuses to lift a drag
-                      that starts inside this input (see the Step-3 guard). */}
-                  <input
-                    type="text"
-                    className="caption-input"
-                    value={p.caption ?? ''}
-                    placeholder="Caption…"
-                    aria-label={`Caption for page ${p.page_number}`}
-                    onChange={e => onCaptionChange(p, e.target.value)}
-                  />
+                  {/* Step 8 — the row is thumbnail + "Page N" only; the caption
+                      editor moved above the ACTIVE page's image in the preview. */}
                   <img className="page-thumb" src={p.file_path} alt={`Page ${p.page_number}`} />
                   <span className="muted" style={{ marginTop: '6px', display: 'block' }}>Page {p.page_number}</span>
                 </li>
@@ -768,18 +758,42 @@ export default function ComicEditor({ csrfToken }) {
               {(previewMode === 'active'
                 ? selectedPages.filter(p => p.id === activePageId)
                 : selectedPages
-              ).map(p => (
-                <figure
-                  key={p.id}
-                  data-page-id={p.id}
-                  className={'preview-figure' + (activePageId === p.id ? ' preview-figure--active' : '')}
-                  title="Click to make this the active page"
-                  onClick={() => setActivePageId(p.id)}
-                >
-                  {p.caption ? <figcaption className="page-caption">{p.caption}</figcaption> : null}
-                  <img className="preview-thumb" src={p.file_path} alt={`Page ${p.page_number}`} />
-                </figure>
-              ))}
+              ).map(p => {
+                const isActive = activePageId === p.id
+                return (
+                  <figure
+                    key={p.id}
+                    data-page-id={p.id}
+                    className={'preview-figure' + (isActive ? ' preview-figure--active' : '')}
+                    title="Click to make this the active page"
+                    onClick={() => setActivePageId(p.id)}
+                  >
+                    {isActive ? (
+                      /* Step 8 — the caption editor lives HERE: the (Step-4,
+                         unchanged) caption input above the ACTIVE page's image,
+                         centred at the image's width (fit-content figure), with
+                         the save cues beside it. Non-active pages keep the
+                         read-only figcaption (when they have one). */
+                      <>
+                        <input
+                          type="text"
+                          className="caption-input"
+                          value={p.caption ?? ''}
+                          placeholder="Caption…"
+                          aria-label={`Caption for page ${p.page_number}`}
+                          onChange={e => onCaptionChange(p, e.target.value)}
+                        />
+                        {captionSave === 'saving' ? <span className="caption-status muted">Saving caption…</span> : null}
+                        {captionSave === 'saved' ? <span className="caption-status muted">Caption saved</span> : null}
+                        {captionSave === 'error' ? <span className="caption-status error">{captionError}</span> : null}
+                      </>
+                    ) : (
+                      p.caption ? <figcaption className="page-caption">{p.caption}</figcaption> : null
+                    )}
+                    <img className="preview-thumb" src={p.file_path} alt={`Page ${p.page_number}`} />
+                  </figure>
+                )
+              })}
             </div>
           )}
         </div>
