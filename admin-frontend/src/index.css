@@ -78,3 +78,16 @@ button:disabled { opacity: .55; cursor: default; }
 .page-row:active { cursor: grabbing; }
 .page-row--dragging { opacity: .45; }
 .page-row--drop-target { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+
+/* Step 7 — the preview is a BOUNDED window: fixed height + internal scroll
+   (the page itself does not grow). Step 11 swaps the fixed height for a
+   flex-fill inside the resizable section. The active page gets the theme
+   red in BOTH panes (row outline + figure outline) so the two-way sync is
+   visible at a glance. */
+.comic-preview { height: 640px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; padding: 14px; background: var(--card); }
+.preview-toggle { margin-left: 10px; padding: 2px 10px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--muted); }
+.preview-toggle:hover { border-color: var(--accent); filter: none; }
+.preview-toggle--on { border-color: var(--accent); color: var(--ink); background: var(--accent-soft); }
+.page-row--active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.preview-figure { cursor: pointer; }
+.preview-figure--active .preview-thumb { box-shadow: 0 0 0 2px var(--accent); }

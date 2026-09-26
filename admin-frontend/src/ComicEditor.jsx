@@ -22,6 +22,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 //     PATCH /api/admin/comic-pages/:id { caption } — blank → null (an
 //     explicit null CLEARS the server-side caption), no save button by design.
 //
+//   • Step 7 — the preview becomes a BOUNDED, internally-scrolling window;
+//     an `activePageId` (a PAGE id — `selectedId` stays the comic) with
+//     two-way sync (row click → active + centred in the window; figure
+//     click → active + row highlighted) and an all/active toggle
+//     (`previewMode` 'all' | 'active', default 'all').
+//
 // Still NOT here: B4 marquee / crop selection (a later step).
 // Keep the state shape stable.
 //
@@ -111,6 +117,17 @@ export default function ComicEditor({ csrfToken }) {
   const [captionSave, setCaptionSave] = useState(null)   // null | 'saving' | 'saved' | 'error'
   const [captionError, setCaptionError] = useState(null) // the message behind an 'error' status
 
+  // Step 7 — active page + the preview window.
+  // activePageId is a PAGE id (a number). `selectedId` stays the COMIC — the
+  // two must not be conflated (round-2 confirmed UX contract).
+  const [activePageId, setActivePageId] = useState(null)
+  const [previewMode, setPreviewMode] = useState('all')  // 'all' (default) | 'active'
+  const previewRef = useRef(null)                        // the .comic-preview window (the scroll target)
+  // A list-row click asked for the active figure to be centred in the window.
+  // The scroll is deferred to a post-render effect (in 'active' mode the
+  // figure only exists after the re-render), so the intent is flagged here.
+  const scrollActiveRef = useRef(false)
+
   // Clear the deferred single-click timer if the component unmounts early.
   useEffect(() => () => { if (clickTimer.current) clearTimeout(clickTimer.current) }, [])
 
@@ -147,6 +164,37 @@ export default function ComicEditor({ csrfToken }) {
       .filter(p => p.comic_id === selectedId)
       .sort((a, b) => a.page_number - b.page_number)
   }, [pages, selectedId])
+
+  // Step 7 — keep the active page VALID. On first load, a comic switch, or a
+  // page deletion the active id may no longer be one of the selected comic's
+  // pages — fall back to that comic's FIRST page (null when it has none).
+  // Caption edits don't trip this (the id stays in the list), so typing a
+  // caption never yanks the active page back to page 1.
+  useEffect(() => {
+    if (activePageId === null) {
+      if (selectedPages.length) setActivePageId(selectedPages[0].id)
+      return
+    }
+    if (!selectedPages.some(p => p.id === activePageId)) {
+      setActivePageId(selectedPages.length ? selectedPages[0].id : null)
+    }
+  }, [selectedPages, activePageId])
+
+  // Step 7 — two-way sync, list → preview: a row click makes that page the
+  // active one and centres its figure inside the preview window.
+  const onListRowClick = useCallback((pageId) => {
+    scrollActiveRef.current = true
+    setActivePageId(pageId)
+  }, [])
+
+  // Runs AFTER React has rendered the (possibly newly visible) active figure —
+  // in 'active' mode it only exists post-render — and centres it in the window.
+  useEffect(() => {
+    if (!scrollActiveRef.current) return
+    scrollActiveRef.current = false
+    const el = previewRef.current && previewRef.current.querySelector(`[data-page-id="${activePageId}"]`)
+    if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [activePageId, previewMode])
 
   const createComic = useCallback(async () => {
     const title = newTitle.trim()
@@ -663,11 +711,13 @@ export default function ComicEditor({ csrfToken }) {
                   data-page-id={p.id}
                   className={
                     'page-row'
+                    + (activePageId === p.id ? ' page-row--active' : '')
                     + (draggingId === p.id ? ' page-row--dragging' : '')
                     + (dragOverId === p.id && draggingId !== null && draggingId !== p.id ? ' page-row--drop-target' : '')
                   }
                   draggable
-                  title="Drag to reorder"
+                  title="Click to activate · drag to reorder"
+                  onClick={() => onListRowClick(p.id)}
                   onDragStart={e => onRowDragStart(e, p)}
                   onDragEnd={clearDrag}
                   onDragOver={onRowDragOver}
@@ -693,15 +743,39 @@ export default function ComicEditor({ csrfToken }) {
           )}
         </div>
 
-        {/* RIGHT — the live preview: caption ABOVE each image (spec), reading order. */}
+        {/* RIGHT — the live preview (Step 7): a BOUNDED window that scrolls
+            internally (the page doesn't grow), caption ABOVE each image
+            (spec), reading order. Two-way sync: a row click activates +
+            centres a page; a figure click activates + highlights its row.
+            The toggle switches between ALL pages and the ACTIVE page only. */}
         <div className="comic-right">
-          <h3 style={{ margin: '18px 0 8px' }}>Preview</h3>
+          <h3 style={{ margin: '18px 0 8px' }}>
+            Preview
+            <button
+              type="button"
+              className={'preview-toggle' + (previewMode === 'active' ? ' preview-toggle--on' : '')}
+              aria-pressed={previewMode === 'active'}
+              title="Toggle the preview: all pages (scrollable) vs the active page only"
+              onClick={() => setPreviewMode(m => (m === 'all' ? 'active' : 'all'))}
+            >
+              {previewMode === 'active' ? 'active page only' : 'all pages'}
+            </button>
+          </h3>
           {selectedPages.length === 0 ? (
             <p className="muted">No pages yet.</p>
           ) : (
-            <div className="comic-preview">
-              {selectedPages.map(p => (
-                <figure key={p.id} className="preview-figure">
+            <div className="comic-preview" ref={previewRef}>
+              {(previewMode === 'active'
+                ? selectedPages.filter(p => p.id === activePageId)
+                : selectedPages
+              ).map(p => (
+                <figure
+                  key={p.id}
+                  data-page-id={p.id}
+                  className={'preview-figure' + (activePageId === p.id ? ' preview-figure--active' : '')}
+                  title="Click to make this the active page"
+                  onClick={() => setActivePageId(p.id)}
+                >
                   {p.caption ? <figcaption className="page-caption">{p.caption}</figcaption> : null}
                   <img className="preview-thumb" src={p.file_path} alt={`Page ${p.page_number}`} />
                 </figure>
