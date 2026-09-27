@@ -63,6 +63,15 @@ import ResizableSection from './ResizableSection.jsx'
 //     (mirror of the server) + a count notice; the active page falls back to
 //     the new first page ONLY when the deleted page WAS the active one
 //     (or "No pages yet." when the comic is emptied).
+//   • Step 12.5b — MULTI-select: a Ctrl/Cmd+click on a tile/row/figure
+//     TOGGLES it in `selectedIds` (a plain click = the single page; the last
+//     click is the PRIMARY = the active page, which keeps the caption
+//     editor). A softer --selected outline marks the other selected pages.
+//     The "Delete" pill (label carries the count) + the Delete key delete
+//     the WHOLE selection at once — one confirm, a sequential loop of
+//     DELETEs (stable ids, no backend change), ONE optimistic splice+renumber,
+//     and a whole-batch rollback if any delete fails. Esc collapses the
+//     selection back to the primary.
 //
 // Still NOT here: B4 marquee / crop selection (a later step).
 // Keep the state shape stable.
@@ -215,6 +224,10 @@ export default function ComicEditor({ csrfToken }) {
   // activePageId is a PAGE id (a number). `selectedId` stays the COMIC — the
   // two must not be conflated (round-2 confirmed UX contract).
   const [activePageId, setActivePageId] = useState(null)
+  // Step 12.5b — the MULTI-SELECTION: an array of page ids in click order
+  // (last = newest = the primary). A plain click resets it to [that page];
+  // a Ctrl/Cmd+click toggles the page in it. Empty = no multi-selection.
+  const [selectedIds, setSelectedIds] = useState([])
   const [previewMode, setPreviewMode] = useState('all')  // 'all' (default) | 'active'
   const previewRef = useRef(null)                        // the .comic-preview window (the scroll target)
   // A list-row click asked for the active figure to be centred in the window.
@@ -276,16 +289,42 @@ export default function ComicEditor({ csrfToken }) {
   // active page in "active page only" mode). One place computes it: the
   // preview map and the drop slot→full-index mapping both read it, so the
   // indicator, the dragover math, and the drop can't drift apart.
+  // Step 12.5b — in "active page only" mode the window shows the SELECTION
+  // (its 1 member = the active page = today's behaviour); with no selection
+  // it falls back to the active page (the validity effect keeps the two
+  // consistent).
   const visiblePages = previewMode === 'active'
-    ? selectedPages.filter(p => p.id === activePageId)
+    ? (selectedIds.length
+      ? selectedPages.filter(p => selectedIds.includes(p.id))
+      : selectedPages.filter(p => p.id === activePageId))
     : selectedPages
 
-  // Step 7 — keep the active page VALID. On first load, a comic switch, or a
-  // page deletion the active id may no longer be one of the selected comic's
-  // pages — fall back to that comic's FIRST page (null when it has none).
-  // Caption edits don't trip this (the id stays in the list), so typing a
+  // Step 7 + Step 12.5b — keep the selection AND the active page VALID against
+  // the current comic's pages (one effect, the single source of truth):
+  //   1) prune the selection to the comic's pages (a comic switch or a page
+  //      delete drops the ids that no longer belong here),
+  //   2) with a selection, the active (the last-clicked PRIMARY) must be one
+  //      of its members — if it was deleted / is stale, fall back to the LAST
+  //      remaining selection member (newest click);
+  //   3) with no selection, the active is just the comic's FIRST page (the
+  //      Step-7 fallback; null when the comic has none).
+  // Caption edits don't trip this (the ids stay in the list), so typing a
   // caption never yanks the active page back to page 1.
   useEffect(() => {
+    let ids = selectedIds
+    if (ids.length > 0) {
+      const valid = ids.filter(id => selectedPages.some(p => p.id === id))
+      if (valid.length !== ids.length) {
+        ids = valid
+        setSelectedIds(valid)
+      }
+      if (ids.length > 0) {
+        if (!ids.includes(activePageId)) {
+          setActivePageId(ids[ids.length - 1])   // last remaining = newest click
+        }
+        return
+      }
+    }
     if (activePageId === null) {
       if (selectedPages.length) setActivePageId(selectedPages[0].id)
       return
@@ -293,13 +332,23 @@ export default function ComicEditor({ csrfToken }) {
     if (!selectedPages.some(p => p.id === activePageId)) {
       setActivePageId(selectedPages.length ? selectedPages[0].id : null)
     }
-  }, [selectedPages, activePageId])
+  }, [selectedPages, selectedIds, activePageId])
 
-  // Step 7 — two-way sync, list → preview: a row click makes that page the
-  // active one and centres its figure inside the preview window.
-  const onListRowClick = useCallback((pageId) => {
+  // Step 7 — two-way sync, list → preview: a click makes that page the active
+  // one and centres its figure inside the preview window. Step 12.5b adds the
+  // MULTI-SELECT: a PLAIN click keeps today's behaviour (active + a single-page
+  // selection); a Ctrl/Cmd+click TOGGLES the page in the selection (added at
+  // the end = newest = primary) and makes it the active page.
+  const onListRowClick = useCallback((e, pageId) => {
     scrollActiveRef.current = true
-    setActivePageId(pageId)
+    if (e && (e.ctrlKey || e.metaKey)) {
+      setSelectedIds(prev => (prev.includes(pageId)
+        ? prev.filter(id => id !== pageId)     // toggle OFF
+        : [...prev, pageId]))                  // toggle ON (end = newest)
+    } else {
+      setSelectedIds([pageId])                 // plain click = single selection
+    }
+    setActivePageId(pageId)                    // last-clicked = primary
   }, [])
 
   // Runs AFTER React has rendered the (possibly newly visible) active figure —
@@ -798,25 +847,27 @@ export default function ComicEditor({ csrfToken }) {
     return () => clearTimeout(t)
   }, [captionSave])
 
-  // --- Step 12 (+ 12.5a): delete a page (the server renumbers the rest) ------
+  // --- Step 12 (+ 12.5a + 12.5b): delete a page (the server renumbers) ------
   //
-  // One pipeline, THREE affordances, all funnel into deletePage(pageId):
-  //   • the hover bin on a PREVIEW page / TILE / list row → that page
-  //   • the "Delete" pill in the Pages heading row → the ACTIVE page
-  //   • the Delete key → the ACTIVE page (inert while a text field has focus)
-  // The DELETE endpoint renumbers the comic's remaining pages to a clean
-  // 1..N (the old handler left gaps — Step 12's server change). We splice +
-  // renumber LOCALLY (mirroring the server) instead of a full re-fetch, and
-  // the response's `count` (server's truth) is used in the notice. The active
-  // page falls back to the new first page ONLY when the deleted page was the
-  // active one. Deleting the LAST page leaves the comic empty ("No pages
-  // yet.") — legal, and the Step-7 validity effect tolerates activePageId =
-  // null.
+  // TWO pipelines now:
+  //   • deletePage(pageId) — the SURGICAL single delete, used by the hover
+  //     BIN on a PREVIEW page / TILE / list row (each deletes the page it
+  //     points at),
+  //   • deletePages(ids) (below) — the BATCH delete, used by the "Delete"
+  //     pill in the Pages heading row + the Delete key (the whole
+  //     MULTI-selection, or the active page alone when there is none).
+  // Both call the same DELETE endpoint (which renumbers the comic's remaining
+  // pages to a clean 1..N — Step 12's server change) and both splice +
+  // renumber LOCALLY (mirroring the server) instead of a full re-fetch; the
+  // response's `count` (server's truth) goes in the notice. The active page
+  // + the selection reconcile through the validity effect above. Deleting the
+  // LAST page leaves the comic empty ("No pages yet.") — legal, and the
+  // validity effect tolerates activePageId = null.
   const deletePage = useCallback(async (pageId) => {
-    // Step 12.5a — `pageId` is OPTIONAL: a bin passes the page it points at;
-    // the heading pill + Delete key pass the ACTIVE page (or omit it — it
-    // defaults to this closure's activePageId, so the once-bound key
-    // listener always hits the CURRENT active page via the ref mirror).
+    // The hover BIN always passes the page it points at. (Step 12.5a also
+    // allowed a no-arg call defaulting to the active page — kept as a
+    // harmless fallback; the heading pill + Delete key now go through
+    // deletePages/deleteSelection below.)
     if (deleting) return
     if (pageId == null) pageId = activePageId
     if (pageId == null) return
@@ -827,7 +878,6 @@ export default function ComicEditor({ csrfToken }) {
     setDeleting(true)
     setError(null)
     const prevPages = pages
-    const wasActive = pageId === activePageId
     try {
       const res = await fetch(`/api/admin/comic-pages/${pageId}`, {
         method: 'DELETE',
@@ -844,11 +894,11 @@ export default function ComicEditor({ csrfToken }) {
       const renumbered = remaining.map((p, i) => ({ ...p, page_number: i + 1 }))
       const others = prevPages.filter(p => p.comic_id !== selectedId)
       setPages([...others, ...renumbered])
-      // The active page is gone ONLY when we deleted it: point at the new
-      // first page (or none). The Step-7 validity effect is the same
-      // fallback — set it directly so the preview doesn't flicker for one
-      // render. (Deleting a non-active page keeps the active one.)
-      if (wasActive) setActivePageId(renumbered.length ? renumbered[0].id : null)
+      // Step 12.5b — remove the deleted page from the MULTI-SELECTION (the
+      // validity effect above reconciles the active page: last remaining
+      // selected member, else the comic's first page). Deleting a
+      // non-selected page leaves the selection untouched.
+      setSelectedIds(prev => prev.filter(id => id !== pageId))
       setNotice(data.count !== undefined
         ? `Deleted page ${page.page_number} — ${data.count} page${data.count === 1 ? '' : 's'} left.`
         : `Deleted page ${page.page_number}.`)
@@ -860,20 +910,99 @@ export default function ComicEditor({ csrfToken }) {
     }
   }, [activePageId, deleting, selectedPages, pages, selectedId, csrfToken])
 
-  // Step 12.5a — the Delete key deletes the ACTIVE page. GUARD (mandatory):
-  // the key is inert while an INPUT/TEXTAREA/SELECT/contentEditable element
-  // has focus — a caption (or the new-comic title) being typed must stay
-  // editable. House pattern for a window listener = the Step-10 wheel effect
-  // (addEventListener + cleanup); the listener binds once and reads the
-  // LATEST deletePage from a ref so it never goes stale.
-  const deletePageRef = useRef(deletePage)
-  useEffect(() => { deletePageRef.current = deletePage }, [deletePage])
+  // --- Step 12.5b: MULTI-delete (the heading pill + the Delete key) ---------
+  //
+  // ONE confirm names the count + the page numbers, then a SEQUENTIAL loop of
+  // DELETE /api/admin/comic-pages/:id. The ids are STABLE primary keys — the
+  // server renumbers the remaining pages after each delete, but the other
+  // targets' ids stay valid, so the loop order doesn't matter and NO backend
+  // change is needed. Local state: splice ALL the deleted ids out of `pages`
+  // + renumber the rest in ONE update (the net effect of the server's
+  // per-delete renumbers), applied optimistically BEFORE the loop. ANY failed
+  // request rolls the batch back to the pre-batch snapshot — the selection +
+  // active page reconcile through the validity effect above (success: the
+  // deleted ids prune themselves out of the selection; failure: the pages are
+  // back, so the selection stays valid and the batch can be retried).
+  const deletePages = useCallback(async (ids) => {
+    if (deleting) return
+    if (!Array.isArray(ids) || ids.length === 0) return
+    // Resolve to the current comic's pages (reading order); ignore ids that
+    // aren't pages of this comic (a stale selection from another comic).
+    const targets = selectedPages.filter(p => ids.includes(p.id))
+    if (targets.length === 0) return
+    const numbers = targets.map(p => p.page_number)
+    const ok = window.confirm(
+      `Delete ${targets.length} page${targets.length === 1 ? '' : 's'} (pages ${numbers.join(', ')})?`
+      + '\nThe remaining pages renumber — this cannot be undone.',
+    )
+    if (!ok) return
+    setDeleting(true)
+    setError(null)
+    const prevPages = pages                    // pre-batch snapshot (the rollback target)
+    const removed = new Set(targets.map(p => p.id))
+    // Splice ALL deleted pages out of this comic + renumber the remainder —
+    // other comics untouched (same shape as the single-delete apply).
+    const remaining = selectedPages.filter(p => !removed.has(p.id))
+    const renumbered = remaining.map((p, i) => ({ ...p, page_number: i + 1 }))
+    const others = prevPages.filter(p => p.comic_id !== selectedId)
+    setPages([...others, ...renumbered])
+    try {
+      let finalCount = undefined
+      for (const target of targets) {
+        const res = await fetch(`/api/admin/comic-pages/${target.id}`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        })
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}))
+          throw new Error(data.error || `delete answered ${res.status}`)
+        }
+        finalCount = (await res.json().catch(() => ({}))).count
+      }
+      setNotice(finalCount !== undefined
+        ? `Deleted ${targets.length} page${targets.length === 1 ? '' : 's'} — ${finalCount} page${finalCount === 1 ? '' : 's'} left.`
+        : `Deleted ${targets.length} page${targets.length === 1 ? '' : 's'}.`)
+    } catch (err) {
+      setPages(prevPages)                      // roll the whole batch back
+      setError(err.message)
+    } finally {
+      setDeleting(false)
+    }
+  }, [deleting, selectedPages, pages, selectedId, csrfToken])
+
+  // Step 12.5b — the "delete the selection" entry point (heading pill + the
+  // Delete key): the whole multi-selection, or the ACTIVE page alone (1 page)
+  // when there is no selection.
+  const deleteSelection = useCallback(() => {
+    const ids = selectedIds.length ? selectedIds : (activePageId != null ? [activePageId] : [])
+    if (ids.length === 0) return
+    deletePages(ids)
+  }, [selectedIds, activePageId, deletePages])
+
+  // Step 12.5a + 12.5b — keyboard delete + Esc. The Delete key deletes the
+  // SELECTION (falling back to the active page — 1 page) instead of the
+  // active page alone. GUARD (mandatory, since 12.5a): the key is inert
+  // while an INPUT/TEXTAREA/SELECT/contentEditable element has focus — a
+  // caption (or the new-comic title) being typed must stay editable. Esc
+  // collapses the selection to just the primary (active) page. Both listeners
+  // bind ONCE (house pattern: the Step-10 wheel effect) and read the LATEST
+  // callback / state from refs, so they never go stale.
+  const deleteSelectionRef = useRef(deleteSelection)
+  useEffect(() => { deleteSelectionRef.current = deleteSelection }, [deleteSelection])
+  const activePageIdRef = useRef(activePageId)
+  useEffect(() => { activePageIdRef.current = activePageId }, [activePageId])
   useEffect(() => {
     const onKeyDown = (e) => {
-      if (e.key !== 'Delete') return
       const t = e.target
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
-      deletePageRef.current()
+      const inField = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)
+      if (inField) return                       // typing must stay editable (both keys)
+      if (e.key === 'Delete') {
+        deleteSelectionRef.current()
+      } else if (e.key === 'Escape') {
+        // Collapse a multi-selection to the primary (the active page).
+        // Nothing to collapse when the selection has ≤ 1 member.
+        setSelectedIds(prev => (prev.length > 1 ? [activePageIdRef.current] : prev))
+      }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
@@ -912,6 +1041,12 @@ export default function ComicEditor({ csrfToken }) {
     : 'grid'
   const zoomT = Math.max(0, Math.min(1, (zoom - ZOOM_LIST_MAX) / (ZOOM_FILL_MIN - ZOOM_LIST_MAX)))
   const tilePx = Math.round(GRID_TILE_MIN + zoomT * (GRID_TILE_MAX - GRID_TILE_MIN))
+
+  // Step 12.5b — the heading pill carries the COUNT it will delete: the whole
+  // multi-selection, or the active page alone (1) when there is no selection.
+  const deleteCount = selectedIds.length
+    ? selectedIds.length
+    : (activePageId != null ? 1 : 0)
 
   // Step 11 — the section is the generic RESIZABLE section (plain pattern,
   // reusable by the story / media sections + B2.8): fixed height (state) + a bottom-edge grip
@@ -1012,15 +1147,19 @@ export default function ComicEditor({ csrfToken }) {
               {selectedComic ? <span> — {selectedComic.title}</span> : null}
               <span className="muted" style={{ fontWeight: 400 }}> ({selectedPages.length})</span>
               {reordering ? <span className="muted" style={{ fontWeight: 400 }}> — reordering…</span> : null}
+              {/* Step 12.5b — deletes the WHOLE selection (the active page
+                  alone when there is none); the label carries the count. */}
               <button
                 type="button"
                 className="pages-delete-btn"
-                title="Delete the active page (the Delete key does the same)"
+                title={deleteCount > 1
+                  ? `Delete the ${deleteCount} selected pages (the Delete key does the same)`
+                  : 'Delete the active page (the Delete key does the same)'}
                 disabled={selectedPages.length === 0 || deleting}
-                onClick={() => deletePage(activePageId)}
+                onClick={() => deleteSelection()}
               >
                 <PageBinIcon />
-                Delete
+                {deleteCount > 1 ? `Delete ${deleteCount}` : 'Delete'}
               </button>
             </h3>
 
@@ -1035,6 +1174,10 @@ export default function ComicEditor({ csrfToken }) {
               >
                 {selectedPages.map(p => {
                   const isActive = activePageId === p.id
+                  // Step 12.5b — the multi-selection membership (the ACTIVE
+                  // page takes the full --active treatment; the other selected
+                  // pages get the softer --selected outline).
+                  const isSelected = !isActive && selectedIds.includes(p.id)
                   if (zoomRegime === 'list') {
                     // Step 10 — fully zoomed OUT: a vertical file-name list
                     // (no thumbnails). Click still activates + centres the
@@ -1044,9 +1187,13 @@ export default function ComicEditor({ csrfToken }) {
                       <li
                         key={p.id}
                         data-page-id={p.id}
-                        className={'page-list-item' + (isActive ? ' page-list-item--active' : '')}
-                        title={`${fileNameOf(p.file_path)} — click to activate`}
-                        onClick={() => onListRowClick(p.id)}
+                        className={
+                          'page-list-item'
+                          + (isActive ? ' page-list-item--active' : '')
+                          + (isSelected ? ' page-list-item--selected' : '')
+                        }
+                        title={`${fileNameOf(p.file_path)} — click to activate · Ctrl+click to multi-select`}
+                        onClick={e => onListRowClick(e, p.id)}
                       >
                         <span className="page-list-num">Page {p.page_number}</span>
                         <span className="page-list-name">{fileNameOf(p.file_path)}</span>
@@ -1072,12 +1219,13 @@ export default function ComicEditor({ csrfToken }) {
                       className={
                         'page-tile'
                         + (isActive ? ' page-tile--active' : '')
+                        + (isSelected ? ' page-tile--selected' : '')
                         + (draggingId === p.id ? ' page-tile--dragging' : '')
                         + (dragOverId === p.id && draggingId !== null && draggingId !== p.id ? ' page-tile--drop-target' : '')
                       }
                       draggable
-                      title={`${fileNameOf(p.file_path)} — click to activate · drag to reorder`}
-                      onClick={() => onListRowClick(p.id)}
+                      title={`${fileNameOf(p.file_path)} — click to activate · Ctrl+click to multi-select · drag to reorder`}
+                      onClick={e => onListRowClick(e, p.id)}
                       onDragStart={e => onRowDragStart(e, p)}
                       onDragEnd={clearDrag}
                       onDragOver={onRowDragOver}
@@ -1155,6 +1303,9 @@ export default function ComicEditor({ csrfToken }) {
             >
               {visiblePages.map((p, i) => {
                 const isActive = activePageId === p.id
+                // Step 12.5b — multi-select outline on the selected (non-active)
+                // figures; the active one keeps the full --active treatment.
+                const isSelected = !isActive && selectedIds.includes(p.id)
                 // Step 9.5 — the insertion-slot bar (above = before this
                 // figure, below = after). Never shown on a no-op slot (before
                 // or after the dragged figure itself).
@@ -1170,11 +1321,12 @@ export default function ComicEditor({ csrfToken }) {
                     className={
                       'preview-figure'
                       + (isActive ? ' preview-figure--active' : '')
+                      + (isSelected ? ' preview-figure--selected' : '')
                       + (showBefore ? ' preview-figure--drop-before' : '')
                       + (showAfter ? ' preview-figure--drop-after' : '')
                     }
-                    title="Click to make this the active page · drag to reorder"
-                    onClick={() => setActivePageId(p.id)}
+                    title="Click to make this the active page · Ctrl+click to multi-select · drag to reorder"
+                    onClick={e => onListRowClick(e, p.id)}
                     draggable
                     onDragStart={e => onRowDragStart(e, p)}
                     onDragEnd={clearDrag}

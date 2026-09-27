@@ -210,8 +210,16 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 .preview-toggle:hover { border-color: var(--accent); filter: none; }
 .preview-toggle--on { border-color: var(--accent); color: var(--ink); background: var(--accent-soft); }
 .page-tile--active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+/* Step 12.5b — the MULTI-selection outline: a SOFTER red ring than the
+   active page's (1px vs 2px), so the selection is visible at a glance but
+   the PRIMARY (active) page still reads as the strongest. The active page
+   takes the --active treatment (the two classes are mutually exclusive in
+   the markup), so a selected-but-not-active page never looks active. */
+.page-tile--selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft); }
+.page-list-item--selected { border-color: var(--accent); background: rgba(172, 46, 52, .08); }
 .preview-figure { cursor: pointer; }
 .preview-figure--active .preview-thumb { box-shadow: 0 0 0 2px var(--accent); }
+.preview-figure--selected .preview-thumb { box-shadow: 0 0 0 1px var(--accent); }
 /* Step 9.5 — the preview's insertion-slot indicator (a figure drag, or a
    tile drag dropped into the preview): a solid red bar on the edge of the
    figure the drop would land BEFORE (bar above it) / AFTER (bar below it). */
