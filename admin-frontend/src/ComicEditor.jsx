@@ -33,6 +33,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 //     width), with the save cues; the left-pane rows lost their caption bars
 //     (thumbnail + "Page N" only). The debounce / PATCH / save-state code is
 //     the SAME Step-4 code — moved, not rewritten.
+//   • Step 9 — the left page list is now a grid of fixed SQUARE (1:1) tiles
+//     (`.page-grid` / `.page-tile`): many pages visible at once (≥5/row at the
+//     editor's width), a "Page N" corner label, the file name as the hover
+//     tooltip (title — Step 10's zoomed-out file-name list will reuse it), and
+//     the Step-7 active highlight + click-to-activate and the Step-3 reorder
+//     DnD all living on the tiles. Step 10 adds wheel zoom on top; Step 14 adds
+//     file-insertion — the two paths stay separable (a reorder drag carries
+//     `text/plain`, never `Files`; an OS file drag never lifts a tile).
 //
 // Still NOT here: B4 marquee / crop selection (a later step).
 // Keep the state shape stable.
@@ -69,6 +77,15 @@ function extForImageType(mime) {
   if (sub === 'jpeg') return 'jpg'
   if (/^[a-z0-9]+$/.test(sub)) return sub
   return 'img'
+}
+
+// Step 9 — the FILE NAME for a tile's hover tooltip (and Step 10's zoomed-out
+// file-name list): the last path segment of the server file_path
+// (e.g. /uploads/comics/<uuid>/page-2.png → "page-2.png"). The uuid folder is
+// opaque, so the owner's own file name is what they can recognise.
+function fileNameOf(file_path) {
+  const segs = String(file_path || '').split('/').filter(Boolean)
+  return segs.length ? segs[segs.length - 1] : 'image'
 }
 
 // THE upload call (the house pattern — copied shape, `kind` BEFORE `file`,
@@ -418,10 +435,11 @@ export default function ComicEditor({ csrfToken }) {
 
   // --- Step 3: drag-reorder ----------------------------------------------------
   //
-  // Native HTML5 DnD (no dependency). Each left-pane row is draggable:
-  //   • dragstart on a row records the dragged id,
-  //   • drop ON A ROW → the dragged page lands at that row's position,
-  //   • drop ON THE LIST (a row gap / the list body) → it lands last,
+  // Native HTML5 DnD (no dependency). Each left-pane tile is draggable (a row
+  // before Step 9 — the same handlers, tile markup):
+  //   • dragstart on a tile records the dragged id,
+  //   • drop ON A TILE → the dragged page lands at that tile's position,
+  //   • drop ON THE GRID BODY (a gap / the ul itself) → it lands last,
   //   • dragend (any drop, or Escape) just clears the drag styling.
   // The new order is applied OPTIMISTICALLY (renumbered 1..n locally) and
   // persisted with the B2.4 reorder endpoint — which demands the FULL exact
@@ -697,10 +715,13 @@ export default function ComicEditor({ csrfToken }) {
           {selectedPages.length === 0 ? (
             <p className="muted">No pages yet.</p>
           ) : (
-            /* Step 3 — the list is itself a drop target (gap drop = last);
-               each row is draggable (row drop = land at that row's position). */
+            // Step 9 — a grid of fixed SQUARE (1:1) tiles (`.page-grid`):
+            // many pages at once (≥5/row), a "Page N" corner label, the file
+            // name as the hover tooltip, the Step-7 active highlight +
+            // click-to-activate, and the Step-3 reorder DnD all on the tiles
+            // (tile drop = that position, grid-body drop = last).
             <ul
-              className="page-list"
+              className="page-grid"
               onDragOver={onRowDragOver}
               onDrop={onListDrop}
             >
@@ -709,13 +730,13 @@ export default function ComicEditor({ csrfToken }) {
                   key={p.id}
                   data-page-id={p.id}
                   className={
-                    'page-row'
-                    + (activePageId === p.id ? ' page-row--active' : '')
-                    + (draggingId === p.id ? ' page-row--dragging' : '')
-                    + (dragOverId === p.id && draggingId !== null && draggingId !== p.id ? ' page-row--drop-target' : '')
+                    'page-tile'
+                    + (activePageId === p.id ? ' page-tile--active' : '')
+                    + (draggingId === p.id ? ' page-tile--dragging' : '')
+                    + (dragOverId === p.id && draggingId !== null && draggingId !== p.id ? ' page-tile--drop-target' : '')
                   }
                   draggable
-                  title="Click to activate · drag to reorder"
+                  title={`${fileNameOf(p.file_path)} — click to activate · drag to reorder`}
                   onClick={() => onListRowClick(p.id)}
                   onDragStart={e => onRowDragStart(e, p)}
                   onDragEnd={clearDrag}
@@ -723,10 +744,8 @@ export default function ComicEditor({ csrfToken }) {
                   onDragLeave={onRowDragLeave}
                   onDrop={e => onRowDrop(e, p)}
                 >
-                  {/* Step 8 — the row is thumbnail + "Page N" only; the caption
-                      editor moved above the ACTIVE page's image in the preview. */}
-                  <img className="page-thumb" src={p.file_path} alt={`Page ${p.page_number}`} />
-                  <span className="muted" style={{ marginTop: '6px', display: 'block' }}>Page {p.page_number}</span>
+                  <img src={p.file_path} alt={`Page ${p.page_number}`} />
+                  <span className="page-tile-label">Page {p.page_number}</span>
                 </li>
               ))}
             </ul>

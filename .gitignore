@@ -35,3 +35,6 @@ admin-frontend/dist/
 # B2.4: upload artifacts (binary content, regenerable — Render's free-tier disk
 # is wiped on every restart per C3, and we re-upload test content each time)
 public/uploads/
+
+# test_images/ — user-supplied verification images (workspace-only, never part of the site)
+test_images/

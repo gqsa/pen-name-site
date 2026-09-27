@@ -49,12 +49,18 @@ button:disabled { opacity: .55; cursor: default; }
 .comic-split { display: flex; gap: 24px; align-items: flex-start; }
 .comic-split > * { flex: 1; min-width: 0; }
 
-/* Left pane — the compact page list (thumbnail + "Page N" only since Step 8 —
-   the caption editor moved into the preview). */
-.page-list { list-style: none; padding: 0; margin: 0; }
-.page-row { margin: 0 0 12px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+/* Left pane — the PAGES WINDOW (Step 9): a grid of fixed SQUARE (1:1) tiles,
+   so many pages are visible at once (≥5/row at the editor's width) — no
+   horizontal strip. Each tile = the page image (object-fit: CONTAIN — a comic
+   page must stay wholly visible to identify it; cover would crop) + a small
+   "Page N" corner label; the file name is the hover tooltip (the title
+   attribute — Step 10's zoomed-out file-name list will reuse it). The caption
+   editor moved into the preview (Step 8), so a tile carries no caption bar. */
+.page-grid { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+.page-tile { position: relative; aspect-ratio: 1/1; border: 1px solid var(--line); border-radius: 8px; background: #000; overflow: hidden; }
+.page-tile img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.page-tile-label { position: absolute; left: 5px; bottom: 5px; padding: 1px 6px; font-size: 11px; line-height: 1.4; background: rgba(0, 0, 0, .72); border-radius: 4px; }
 .page-caption { margin: 0 0 8px; font-weight: 600; }
-.page-thumb { display: block; max-width: 100%; max-height: 120px; width: auto; height: auto; object-fit: contain; background: #000; border-radius: 4px; }
 
 /* Step 8 — the editable caption input now sits above the ACTIVE page's image
    in the PREVIEW (moved here from the left-pane rows; the Step-4 debounce /
@@ -80,11 +86,12 @@ button:disabled { opacity: .55; cursor: default; }
 .dropzone--active { border-color: var(--accent); background: var(--accent-soft); }
 .dropzone--busy { cursor: wait; opacity: .75; }
 
-/* Step 3 — drag-reorder affordances on the page rows (native HTML5 DnD). */
-.page-row { cursor: grab; }
-.page-row:active { cursor: grabbing; }
-.page-row--dragging { opacity: .45; }
-.page-row--drop-target { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+/* Step 3 (tile form since Step 9) — drag-reorder affordances on the tiles
+   (native HTML5 DnD). */
+.page-tile { cursor: grab; }
+.page-tile:active { cursor: grabbing; }
+.page-tile--dragging { opacity: .45; }
+.page-tile--drop-target { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 
 /* Step 7 — the preview is a BOUNDED window: fixed height + internal scroll
    (the page itself does not grow). Step 11 swaps the fixed height for a
@@ -95,6 +102,6 @@ button:disabled { opacity: .55; cursor: default; }
 .preview-toggle { margin-left: 10px; padding: 2px 10px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--muted); }
 .preview-toggle:hover { border-color: var(--accent); filter: none; }
 .preview-toggle--on { border-color: var(--accent); color: var(--ink); background: var(--accent-soft); }
-.page-row--active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.page-tile--active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .preview-figure { cursor: pointer; }
 .preview-figure--active .preview-thumb { box-shadow: 0 0 0 2px var(--accent); }
