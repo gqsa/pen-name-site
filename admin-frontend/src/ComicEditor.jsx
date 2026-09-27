@@ -266,12 +266,16 @@ export default function ComicEditor({ csrfToken }) {
   // zoom AND stop the page scrolling — the native one stuck, `onWheel`
   // couldn't. Bound once the section has rendered (`comics !== null`), so the
   // ref is non-null; re-runs when that flips, cleanup removes the listener.
+  // Zoom is gated on Ctrl: Ctrl+scroll and trackpad-pinch (the browser delivers
+  // pinch as a ctrl+wheel event) both zoom; a PLAIN scroll passes through and
+  // scrolls the page behind normally (no preventDefault, no zoom).
   useEffect(() => {
     if (comics === null) return undefined
     const el = pagesSectionRef.current
     if (!el) return undefined
     const onWheel = (e) => {
-      e.preventDefault()                          // the page behind must NOT scroll
+      if (!e.ctrlKey) return                      // plain scroll: let the page scroll, don't zoom
+      e.preventDefault()                          // ctrl+scroll / pinch: the page behind must NOT scroll
       const dir = e.deltaY > 0 ? -1 : 1           // wheel down = zoom out, up = in
       setZoom(z => Math.max(0, Math.min(100, z + dir * ZOOM_STEP)))
     }
