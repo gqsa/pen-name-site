@@ -14,8 +14,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "build:admin": "npm run build -w admin-frontend",
-    "postinstall": "npm run build:admin"
+    "build:admin": "npm run build -w admin-frontend"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
