@@ -4,8 +4,9 @@ import { useState } from 'react'
 // with a fixed height (state, px), its content in a flex body that fills, and
 // a grip strip on the BOTTOM edge that drag-resizes the height — pointerdown
 // on the grip → pointermove tracked on window → clamped setH → pointerup
-// releases. Nothing in here knows about comics or stories, so B2.8 can mount
-// one instance per open editor and each keeps its own height.
+// releases. Nothing in here knows about comics or stories, so the story / media
+// editor sections (and B2.8 — editor‑section minimise) can mount one per section
+// and each keeps its own height.
 //
 // Lifetime: the height is session state. It resets to `initialHeight` on a
 // page reload (Step 11's spec accepts that) and survives a comic switch

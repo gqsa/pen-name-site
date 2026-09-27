@@ -44,8 +44,8 @@ button:disabled { opacity: .55; cursor: default; }
 .checklist input[type=checkbox] { width: auto; margin: 0; }
 
 /* Step 11 (B2.5 round 2) — the GENERIC resizable-section pattern (a plain
-   pattern — no editor-specific coupling, so B2.8 can mount one per editor
-   instance). The section has a fixed height (inline, from React state) and
+   pattern — no editor-specific coupling, so the story / media editor sections
+   — and B2.8 (editor‑section minimise) — can mount one per section). The section has a fixed height (inline, from React state) and
    is a flex column: the body fills (min-height: 0 lets its flex children
    shrink and scroll internally) and a grip strip sits on the bottom edge
    (cursor: ns-resize; the pointer-drag + clamping live in the component). */

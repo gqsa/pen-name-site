@@ -502,7 +502,7 @@ const B2X_ROWS = [
   ['B2.5', 'Comic editor in React (upload, reorder, captions, live preview, auto-save)', 1],
   ['B2.6', 'Story editor in React (upload / paste, auto-save)', 0],
   ['B2.7', 'Image / video upload editor in React', 0],
-  ['B2.8', 'Multi-editor + minimise-all', 0],
+  ['B2.8', 'Editor sections minimisable (each comic / story / media editor section collapses to a header bar)', 0],
   ['B2.9', 'Member announcements in React + retire the EJS admin page', 0],
   ['B2.10', 'Production wiring + Render deploy + runbook', 0],
 ];
@@ -607,6 +607,19 @@ const B2X_ROWS = [
   if (b6 && b6.label !== B6_LABEL) {
     db.prepare("UPDATE roadmap SET label = ? WHERE phase = 'B' AND step = 'B6'").run(B6_LABEL);
     console.log('[cleanup] refreshed roadmap B6 label (single-doc import added)');
+  }
+  // B2.8 re-scoped (2026-09-27): the old "Multi-editor + minimise-all" step is
+  // SUPERSEDED — each editor already has a dropdown of the created comics/stories/
+  // media + auto-save, so a WIP is just another entry in that dropdown; parallel
+  // editor instances add nothing. Its minimise intent lives on as the new B2.8
+  // (editor sections minimisable, formerly B14). Refresh the label on tables
+  // seeded with the old scope (same pattern as the B6 label refresh above) —
+  // no-ops once applied (idempotent), so no phantom open item stays in the tracker.
+  const B28_LABEL = 'Editor sections minimisable (each comic / story / media editor section collapses to a header bar)';
+  const b28 = db.prepare("SELECT label FROM roadmap WHERE phase = 'B' AND step = 'B2.8'").get();
+  if (b28 && b28.label !== B28_LABEL) {
+    db.prepare("UPDATE roadmap SET label = ? WHERE phase = 'B' AND step = 'B2.8'").run(B28_LABEL);
+    console.log('[cleanup] refreshed roadmap B2.8 label (re-scoped: multi-editor superseded → sections minimisable)');
   }
   // Retire the old per-reader "learning progress" table (no longer used).
   db.exec('DROP TABLE IF EXISTS progress;');

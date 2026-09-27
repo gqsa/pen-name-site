@@ -772,7 +772,7 @@ export default function ComicEditor({ csrfToken }) {
   const tilePx = Math.round(GRID_TILE_MIN + zoomT * (GRID_TILE_MAX - GRID_TILE_MIN))
 
   // Step 11 — the section is the generic RESIZABLE section (plain pattern,
-  // reusable per editor in B2.8): fixed height (state) + a bottom-edge grip
+  // reusable by the story / media sections + B2.8): fixed height (state) + a bottom-edge grip
   // that drag-resizes it; the two windows inside flex-fill + scroll
   // internally. The loading / error branches above stay plain <section>s.
   return (
