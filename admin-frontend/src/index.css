@@ -43,11 +43,43 @@ button:disabled { opacity: .55; cursor: default; }
 .checklist li { margin: 8px 0; display: flex; align-items: center; gap: 8px; }
 .checklist input[type=checkbox] { width: auto; margin: 0; }
 
+/* Step 11 (B2.5 round 2) — the GENERIC resizable-section pattern (a plain
+   pattern — no editor-specific coupling, so B2.8 can mount one per editor
+   instance). The section has a fixed height (inline, from React state) and
+   is a flex column: the body fills (min-height: 0 lets its flex children
+   shrink and scroll internally) and a grip strip sits on the bottom edge
+   (cursor: ns-resize; the pointer-drag + clamping live in the component). */
+.resizable-section { display: flex; flex-direction: column; }
+.resizable-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.resizable-grip { flex: 0 0 16px; margin-top: 4px; display: flex; align-items: center; justify-content: center; cursor: ns-resize; border-radius: 4px; }
+.resizable-grip::before { content: ""; width: 48px; height: 4px; border-radius: 2px; background: var(--line); }
+.resizable-grip:hover { background: var(--accent-soft); }
+.resizable-grip:hover::before { background: var(--accent); }
+/* While the grip is dragged: force the ns-resize cursor everywhere and
+   suppress text selection (dragging over the body would otherwise grab
+   text / start a native drag). */
+body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select: none; }
+
 /* B2.5 — the comic editor: a wider split-view container than the 780px `.wrap`
-   (the editor renders as a sibling of `.wrap`, so it isn't clamped to 780px). */
+   (the editor renders as a sibling of `.wrap`, so it isn't clamped to 780px).
+   Step 11 — it is the generic resizable section above: fixed height, flex
+   column, bottom-edge grip. */
 .comic-editor { max-width: 1100px; margin: 40px auto; padding: 0 16px; }
-.comic-split { display: flex; gap: 24px; align-items: flex-start; }
+/* Step 11 — the split fills the remaining body height and both panes
+   stretch to its full height (was align-items: flex-start), so the two
+   windows inside can flex-fill vertically. */
+.comic-split { display: flex; gap: 24px; align-items: stretch; flex: 1 1 auto; min-height: 0; }
 .comic-split > * { flex: 1; min-width: 0; }
+/* Step 11 — the panes are flex columns: their fixed header content (the
+   select / new-comic row / dropzone on the left, the Preview heading +
+   toggle on the right) keeps its natural size, and the window below it
+   fills the rest. */
+.comic-left, .comic-right { display: flex; flex-direction: column; min-height: 0; }
+/* Step 11 — the PAGES WINDOW flex-fills the left pane and scrolls
+   internally (the page itself does not stretch). The Step-10 wheel-zoom
+   listener is still bound to this element: a plain wheel now scrolls the
+   window, Ctrl+wheel zooms the tiles. */
+.pages-section { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 
 /* Left pane — the PAGES WINDOW (Step 9): a grid of fixed SQUARE (1:1) tiles,
    so many pages are visible at once (≥5/row at the editor's width) — no
@@ -106,12 +138,12 @@ button:disabled { opacity: .55; cursor: default; }
 .page-tile--dragging { opacity: .45; }
 .page-tile--drop-target { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 
-/* Step 7 — the preview is a BOUNDED window: fixed height + internal scroll
-   (the page itself does not grow). Step 11 swaps the fixed height for a
-   flex-fill inside the resizable section. The active page gets the theme
-   red in BOTH panes (row outline + figure outline) so the two-way sync is
-   visible at a glance. */
-.comic-preview { height: 640px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; padding: 14px; background: var(--card); }
+/* Step 7 — the preview is a BOUNDED window with internal scroll (the page
+   itself does not grow); Step 11 (done) replaced the fixed 640px height
+   with a flex-fill inside the resizable section. The active page gets the
+   theme red in BOTH panes (row outline + figure outline) so the two-way
+   sync is visible at a glance. */
+.comic-preview { flex: 1 1 auto; min-height: 0; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; padding: 14px; background: var(--card); }
 .preview-toggle { margin-left: 10px; padding: 2px 10px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--muted); }
 .preview-toggle:hover { border-color: var(--accent); filter: none; }
 .preview-toggle--on { border-color: var(--accent); color: var(--ink); background: var(--accent-soft); }

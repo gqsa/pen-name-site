@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import ResizableSection from './ResizableSection.jsx'
 
 // B2.5 — the comic editor — shell + dropzone/upload + drag-reorder + caption auto-save.
 //
@@ -770,8 +771,12 @@ export default function ComicEditor({ csrfToken }) {
   const zoomT = Math.max(0, Math.min(1, (zoom - ZOOM_LIST_MAX) / (ZOOM_FILL_MIN - ZOOM_LIST_MAX)))
   const tilePx = Math.round(GRID_TILE_MIN + zoomT * (GRID_TILE_MAX - GRID_TILE_MIN))
 
+  // Step 11 — the section is the generic RESIZABLE section (plain pattern,
+  // reusable per editor in B2.8): fixed height (state) + a bottom-edge grip
+  // that drag-resizes it; the two windows inside flex-fill + scroll
+  // internally. The loading / error branches above stay plain <section>s.
   return (
-    <section className="comic-editor">
+    <ResizableSection className="comic-editor">
       <h2>Comic editor</h2>
       <p className="muted">
         Split view — pick or create a comic on the left, add its pages with the
@@ -1017,6 +1022,6 @@ export default function ComicEditor({ csrfToken }) {
           )}
         </div>
       </div>
-    </section>
+    </ResizableSection>
   )
 }
