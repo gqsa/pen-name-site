@@ -1339,11 +1339,35 @@ app.patch('/api/admin/comic-pages/:id', async (req, res) => {
   }
 });
 
+// B2.5 Step 12: delete RENUMBERS. After a page goes, the comic's remaining
+// pages must be a clean 1..N (the old handler left gaps). The two-phase
+// renumber is the reorder handler's exact pattern — a naive in-place renumber
+// collides with UNIQUE(comic_id,page_number) the moment a page moves onto a
+// number another page still holds. Delete + renumber in ONE transaction: if
+// the renumber fails, the delete rolls back with it (no gap, no half state).
+// Deleting the LAST page is a no-op renumber (empty loop) — the comic stays
+// with zero pages, which is legal (reorder's contract only applies when pages
+// exist).
 app.delete('/api/admin/comic-pages/:id', (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
-  const r = db.prepare('DELETE FROM comic_pages WHERE id = ?').run(Number(req.params.id));
-  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
-  res.json({ success: true });
+  const id = Number(req.params.id);
+  const page = db.prepare('SELECT comic_id FROM comic_pages WHERE id = ?').get(id);
+  if (!page) return res.status(404).json({ error: 'Not found' });
+  try {
+    db.exec('BEGIN');
+    db.prepare('DELETE FROM comic_pages WHERE id = ?').run(id);
+    const remaining = db.prepare('SELECT id FROM comic_pages WHERE comic_id = ? ORDER BY page_number ASC').all(page.comic_id);
+    const BASE = 1000000; // temp range that can't collide with real page numbers
+    for (let i = 0; i < remaining.length; i++)
+      db.prepare('UPDATE comic_pages SET page_number = ? WHERE id = ?').run(BASE + i, remaining[i].id);
+    for (let i = 0; i < remaining.length; i++)
+      db.prepare('UPDATE comic_pages SET page_number = ? WHERE id = ?').run(i + 1, remaining[i].id);
+    db.exec('COMMIT');
+    res.json({ success: true, comic_id: page.comic_id, count: remaining.length });
+  } catch (e) {
+    db.exec('ROLLBACK');
+    res.status(400).json({ error: e.message });
+  }
 });
 
 // B2.4: reorder = renumber. CONTRACT: page_ids must be EXACTLY the comic's

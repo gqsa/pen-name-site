@@ -19,7 +19,9 @@
 //       the 403 is the admin gate); admin without the header 403 (CSRF block)
 //   3.  stories: POST 201 → PUT change persisted → DELETE gone; non-admin 403
 //   4.  comics+pages: POST comic → POST 2 pages → REORDER (order flips) →
-//       caption set → DELETE a page → DELETE comic → CASCADE (0 pages left);
+//       caption set → DELETE a page (B2.5 Step 12: renumbers to clean 1..N)
+//       → DELETE comic → CASCADE (0 pages left) → DELETE middle of a 5-page
+//       comic → clean 1-4, last page → 1-3, bogus id → 404;
 //       non-admin 403 on the write routes
 //   5.  images + videos: POST/PUT(caption)/DELETE each; non-admin 403
 //   6.  schema: caption on comic_pages + images + videos; updated_at INTEGER
@@ -334,8 +336,12 @@ async function main() {
       check('4h. DELETE a page → 200', r.status === 200, `status ${r.status}`);
       await r.text();
       const c3 = (await content()).body;
-      check('4i. page count for the comic dropped to 1',
-        c3.pages.filter(x => x.comic_id === comicId).length === 1);
+      const c3mine = c3.pages.filter(x => x.comic_id === comicId);
+      // B2.5 Step 12: delete RENUMBERS — p1 was #2 here (p2, the #1 page, just
+      // went), so a clean state is exactly [1] (the old handler left it at #2).
+      check('4i. page count dropped to 1 AND renumbered to #1 (no gap)',
+        c3mine.length === 1 && c3mine[0].page_number === 1,
+        JSON.stringify(c3mine.map(x => `#${x.page_number}`)));
 
       // DELETE the comic → its pages go with it (ON DELETE CASCADE)
       r = await fetch(base + `/api/admin/comics/${comicId}`, { method: 'DELETE', headers: adminGet });
@@ -345,6 +351,50 @@ async function main() {
       check('4k. CASCADE: 0 pages left for the deleted comic',
         c4.pages.filter(x => x.comic_id === comicId).length === 0 &&
         !c4.comics.find(x => x.id === comicId));
+
+      // B2.5 Step 12 spec-verify: middle of a 5-page comic → clean 1-4 (no
+      // gaps); last page → 1-3; bogus id → 404 unchanged. Own comic, deleted
+      // at the end → net DB change stays zero.
+      let r5 = await fetch(base + '/api/admin/comics', {
+        method: 'POST', headers: adminH,
+        body: JSON.stringify({ title: `B24 del comic ${ts}` }),
+      });
+      let j5 = await r5.json().catch(() => ({}));
+      const delComic = j5.id;
+      const delIds = [];
+      for (let n = 1; n <= 5; n++) {
+        const rp = await fetch(base + '/api/admin/comic-pages', {
+          method: 'POST', headers: adminH,
+          body: JSON.stringify({ comic_id: delComic, page_number: n, file_path: `/uploads/comics/${ts}/del${n}.png` }),
+        });
+        const jp = await rp.json().catch(() => ({}));
+        if (rp.status !== 201) break;
+        delIds.push(jp.id);
+      }
+      if (delIds.length === 5) {
+        r5 = await fetch(base + `/api/admin/comic-pages/${delIds[2]}`, { method: 'DELETE', headers: adminGet });
+        check('4o. DELETE the MIDDLE page (of 5) → 200', r5.status === 200, `status ${r5.status}`);
+        await r5.text();
+        let mine5 = (await content()).body.pages.filter(x => x.comic_id === delComic).sort((x, y) => x.page_number - y.page_number);
+        check('4p. renumbered to a clean 1-4 (no gaps)',
+          mine5.length === 4 && mine5.every((x, i) => x.page_number === i + 1),
+          JSON.stringify(mine5.map(x => `#${x.page_number}`)));
+        r5 = await fetch(base + `/api/admin/comic-pages/${delIds[4]}`, { method: 'DELETE', headers: adminGet });
+        check('4q. DELETE the LAST page → 200', r5.status === 200, `status ${r5.status}`);
+        await r5.text();
+        mine5 = (await content()).body.pages.filter(x => x.comic_id === delComic).sort((x, y) => x.page_number - y.page_number);
+        check('4r. clean 1-3 after the last-page delete',
+          mine5.length === 3 && mine5.every((x, i) => x.page_number === i + 1),
+          JSON.stringify(mine5.map(x => `#${x.page_number}`)));
+      } else {
+        check('4o-4r. 5-page fixture setup', false, `only ${delIds.length}/5 pages created — renumber checks skipped`);
+      }
+      r5 = await fetch(base + '/api/admin/comic-pages/99999999', { method: 'DELETE', headers: adminGet });
+      let t5 = await r5.text();
+      check('4s. DELETE bogus page id → 404 "Not found"', r5.status === 404 && /Not found/.test(t5), `got ${r5.status} ${t5}`);
+      r5 = await fetch(base + `/api/admin/comics/${delComic}`, { method: 'DELETE', headers: adminGet });
+      check('4t. cleanup: DELETE the 5-page comic → 200', r5.status === 200, `status ${r5.status}`);
+      await r5.text();
 
       // non-admin → 403 on the write routes (POST with the user's own token)
       let r2 = await fetch(base + '/api/admin/comics', {

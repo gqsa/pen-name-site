@@ -52,6 +52,12 @@ import ResizableSection from './ResizableSection.jsx'
 //     Cross-pane works for free: a tile drag drops on the preview and a
 //     figure drag drops on the tiles — one dragIdRef, one reorder(), so the
 //     two panes can never disagree.
+//   • Step 12 — delete the ACTIVE page: a "Delete page N" button under the
+//     caption editor (visible in both preview modes + every zoom regime).
+//     Confirm → DELETE /api/admin/comic-pages/:id (the server now renumbers
+//     the remaining pages to a clean 1..N — the old handler left gaps) →
+//     local splice + renumber (mirror of the server) + a count notice; the
+//     active page falls back to the new first page (or "No pages yet.").
 //
 // Still NOT here: B4 marquee / crop selection (a later step).
 // Keep the state shape stable.
@@ -71,6 +77,10 @@ import ResizableSection from './ResizableSection.jsx'
 //   • PATCH /api/admin/comic-pages/:id  { caption }  → { success, id }
 //     Caption semantics: an explicit null CLEARS the caption; '' would store
 //     an empty string — so the editor maps blank → null.
+//   • DELETE /api/admin/comic-pages/:id  → { success, comic_id, count }
+//     (B2.5 Step 12) the server RENUMBERS the comic's remaining pages to a
+//     clean 1..N (the old handler left gaps); `count` = the remaining length
+//     (the server's truth — the editor mirrors it locally + splices).
 //
 // Layout note: the shell's `.wrap` column is 780px — too narrow for a two-column
 // split view. This component therefore renders as a SIBLING of `.wrap` (see the
@@ -184,6 +194,10 @@ export default function ComicEditor({ csrfToken }) {
   // (the grid is absent while "No pages yet.").
   const [zoom, setZoom] = useState(50)
   const pagesSectionRef = useRef(null)
+
+  // Step 12 — deleting the ACTIVE page (the server renumbers the rest to a
+  // clean 1..N). `deleting` is the in-flight flag (busy look + re-entry guard).
+  const [deleting, setDeleting] = useState(false)
 
   // Clear the deferred single-click timer if the component unmounts early.
   useEffect(() => () => { if (clickTimer.current) clearTimeout(clickTimer.current) }, [])
@@ -737,6 +751,56 @@ export default function ComicEditor({ csrfToken }) {
     }, 600)
   }, [saveCaption, captionSave])
 
+  // --- Step 12: delete the ACTIVE page (the server renumbers the rest) --------
+  //
+  // One affordance, bound to the active page (visible in both preview modes,
+  // in every zoom regime): a "Delete page N" button under the caption editor.
+  // The DELETE endpoint now renumbers the comic's remaining pages to a clean
+  // 1..N (the old handler left gaps — Step 12's server change). We splice +
+  // renumber LOCALLY (mirroring the server) instead of a full re-fetch, and
+  // the response's `count` (server's truth) is used in the notice. Deleting
+  // the LAST page leaves the comic empty ("No pages yet.") — legal, and the
+  // Step-7 validity effect already tolerates activePageId = null.
+  const deleteActivePage = useCallback(async () => {
+    if (activePageId === null || deleting) return
+    const page = selectedPages.find(p => p.id === activePageId)
+    if (!page) return
+    const ok = window.confirm(`Delete page ${page.page_number} (${fileNameOf(page.file_path)})?\nThe remaining pages renumber — this cannot be undone.`)
+    if (!ok) return
+    setDeleting(true)
+    setError(null)
+    const prevPages = pages
+    try {
+      const res = await fetch(`/api/admin/comic-pages/${page.id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `delete answered ${res.status}`)
+      }
+      const data = await res.json().catch(() => ({}))
+      // Splice + renumber this comic's remaining pages (mirror of the server
+      // renumber); other comics untouched — same shape as the reorder apply.
+      const remaining = selectedPages.filter(p => p.id !== page.id)
+      const renumbered = remaining.map((p, i) => ({ ...p, page_number: i + 1 }))
+      const others = prevPages.filter(p => p.comic_id !== selectedId)
+      setPages([...others, ...renumbered])
+      // The active page is gone: point at the new first page (or none). The
+      // Step-7 validity effect is the same fallback — set it directly so the
+      // preview doesn't flicker for one render.
+      setActivePageId(renumbered.length ? renumbered[0].id : null)
+      setNotice(data.count !== undefined
+        ? `Deleted page ${page.page_number} — ${data.count} page${data.count === 1 ? '' : 's'} left.`
+        : `Deleted page ${page.page_number}.`)
+    } catch (err) {
+      setPages(prevPages)
+      setError(err.message)
+    } finally {
+      setDeleting(false)
+    }
+  }, [activePageId, deleting, selectedPages, pages, selectedId, csrfToken])
+
   // --- Loading / error (before the first fetch lands) -------------------------
   if (comics === null) {
     if (error) {
@@ -1010,6 +1074,20 @@ export default function ComicEditor({ csrfToken }) {
                         {captionSave === 'saving' ? <span className="caption-status muted">Saving caption…</span> : null}
                         {captionSave === 'saved' ? <span className="caption-status muted">Caption saved</span> : null}
                         {captionSave === 'error' ? <span className="caption-status error">{captionError}</span> : null}
+                        {/* Step 12 — delete the ACTIVE page (server renumbers
+                            the rest to a clean 1..N; a confirm guards the
+                            irreversible delete). */}
+                        <div className="page-delete-row">
+                          <button
+                            type="button"
+                            className="delete-page-btn"
+                            title="Delete this page — the remaining pages renumber"
+                            disabled={deleting}
+                            onClick={deleteActivePage}
+                          >
+                            {deleting ? 'Deleting…' : `Delete page ${p.page_number}`}
+                          </button>
+                        </div>
                       </>
                     ) : (
                       p.caption ? <figcaption className="page-caption">{p.caption}</figcaption> : null
