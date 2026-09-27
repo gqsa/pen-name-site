@@ -52,12 +52,17 @@ import ResizableSection from './ResizableSection.jsx'
 //     Cross-pane works for free: a tile drag drops on the preview and a
 //     figure drag drops on the tiles — one dragIdRef, one reorder(), so the
 //     two panes can never disagree.
-//   • Step 12 — delete the ACTIVE page: a "Delete page N" button under the
-//     caption editor (visible in both preview modes + every zoom regime).
-//     Confirm → DELETE /api/admin/comic-pages/:id (the server now renumbers
-//     the remaining pages to a clean 1..N — the old handler left gaps) →
-//     local splice + renumber (mirror of the server) + a count notice; the
-//     active page falls back to the new first page (or "No pages yet.").
+//   • Step 12 (+ 12.5a) — delete a page: a hover trash bin on each PREVIEW
+//     page (top-right) and on each TILE / zoomed-out list row (each deletes
+//     the page it points at) + an always-visible "Delete" pill in the Pages
+//     heading row and the Delete key (both delete the ACTIVE page; the key
+//     is inert while a text field has focus — a caption being typed must
+//     stay editable). Each delete: confirm → DELETE
+//     /api/admin/comic-pages/:id (the server renumbers the remaining pages
+//     to a clean 1..N — the old handler left gaps) → local splice + renumber
+//     (mirror of the server) + a count notice; the active page falls back to
+//     the new first page ONLY when the deleted page WAS the active one
+//     (or "No pages yet." when the comic is emptied).
 //
 // Still NOT here: B4 marquee / crop selection (a later step).
 // Keep the state shape stable.
@@ -135,6 +140,37 @@ async function uploadImage(file, csrfToken) {
     throw new Error(data.error || `upload answered ${res.status}`)
   }
   return res.json()
+}
+
+// Step 12.5a — the trash icon (inline SVG, ~14px, currentColor so it follows
+// the button's text colour) + the hover BIN button (preview page / tile /
+// list row). The hover reveal (invisible until the parent is hovered) lives
+// in index.css on `.page-bin`.
+function PageBinIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3 6h18" />
+      <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6M14 11v6" />
+    </svg>
+  )
+}
+
+function PageBin({ title, disabled, onClick }) {
+  return (
+    <button
+      type="button"
+      className="page-bin"
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <PageBinIcon />
+    </button>
+  )
 }
 
 export default function ComicEditor({ csrfToken }) {
@@ -751,27 +787,38 @@ export default function ComicEditor({ csrfToken }) {
     }, 600)
   }, [saveCaption, captionSave])
 
-  // --- Step 12: delete the ACTIVE page (the server renumbers the rest) --------
+  // --- Step 12 (+ 12.5a): delete a page (the server renumbers the rest) ------
   //
-  // One affordance, bound to the active page (visible in both preview modes,
-  // in every zoom regime): a "Delete page N" button under the caption editor.
-  // The DELETE endpoint now renumbers the comic's remaining pages to a clean
+  // One pipeline, THREE affordances, all funnel into deletePage(pageId):
+  //   • the hover bin on a PREVIEW page / TILE / list row → that page
+  //   • the "Delete" pill in the Pages heading row → the ACTIVE page
+  //   • the Delete key → the ACTIVE page (inert while a text field has focus)
+  // The DELETE endpoint renumbers the comic's remaining pages to a clean
   // 1..N (the old handler left gaps — Step 12's server change). We splice +
   // renumber LOCALLY (mirroring the server) instead of a full re-fetch, and
-  // the response's `count` (server's truth) is used in the notice. Deleting
-  // the LAST page leaves the comic empty ("No pages yet.") — legal, and the
-  // Step-7 validity effect already tolerates activePageId = null.
-  const deleteActivePage = useCallback(async () => {
-    if (activePageId === null || deleting) return
-    const page = selectedPages.find(p => p.id === activePageId)
+  // the response's `count` (server's truth) is used in the notice. The active
+  // page falls back to the new first page ONLY when the deleted page was the
+  // active one. Deleting the LAST page leaves the comic empty ("No pages
+  // yet.") — legal, and the Step-7 validity effect tolerates activePageId =
+  // null.
+  const deletePage = useCallback(async (pageId) => {
+    // Step 12.5a — `pageId` is OPTIONAL: a bin passes the page it points at;
+    // the heading pill + Delete key pass the ACTIVE page (or omit it — it
+    // defaults to this closure's activePageId, so the once-bound key
+    // listener always hits the CURRENT active page via the ref mirror).
+    if (deleting) return
+    if (pageId == null) pageId = activePageId
+    if (pageId == null) return
+    const page = selectedPages.find(p => p.id === pageId)
     if (!page) return
     const ok = window.confirm(`Delete page ${page.page_number} (${fileNameOf(page.file_path)})?\nThe remaining pages renumber — this cannot be undone.`)
     if (!ok) return
     setDeleting(true)
     setError(null)
     const prevPages = pages
+    const wasActive = pageId === activePageId
     try {
-      const res = await fetch(`/api/admin/comic-pages/${page.id}`, {
+      const res = await fetch(`/api/admin/comic-pages/${pageId}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
       })
@@ -782,14 +829,15 @@ export default function ComicEditor({ csrfToken }) {
       const data = await res.json().catch(() => ({}))
       // Splice + renumber this comic's remaining pages (mirror of the server
       // renumber); other comics untouched — same shape as the reorder apply.
-      const remaining = selectedPages.filter(p => p.id !== page.id)
+      const remaining = selectedPages.filter(p => p.id !== pageId)
       const renumbered = remaining.map((p, i) => ({ ...p, page_number: i + 1 }))
       const others = prevPages.filter(p => p.comic_id !== selectedId)
       setPages([...others, ...renumbered])
-      // The active page is gone: point at the new first page (or none). The
-      // Step-7 validity effect is the same fallback — set it directly so the
-      // preview doesn't flicker for one render.
-      setActivePageId(renumbered.length ? renumbered[0].id : null)
+      // The active page is gone ONLY when we deleted it: point at the new
+      // first page (or none). The Step-7 validity effect is the same
+      // fallback — set it directly so the preview doesn't flicker for one
+      // render. (Deleting a non-active page keeps the active one.)
+      if (wasActive) setActivePageId(renumbered.length ? renumbered[0].id : null)
       setNotice(data.count !== undefined
         ? `Deleted page ${page.page_number} — ${data.count} page${data.count === 1 ? '' : 's'} left.`
         : `Deleted page ${page.page_number}.`)
@@ -800,6 +848,25 @@ export default function ComicEditor({ csrfToken }) {
       setDeleting(false)
     }
   }, [activePageId, deleting, selectedPages, pages, selectedId, csrfToken])
+
+  // Step 12.5a — the Delete key deletes the ACTIVE page. GUARD (mandatory):
+  // the key is inert while an INPUT/TEXTAREA/SELECT/contentEditable element
+  // has focus — a caption (or the new-comic title) being typed must stay
+  // editable. House pattern for a window listener = the Step-10 wheel effect
+  // (addEventListener + cleanup); the listener binds once and reads the
+  // LATEST deletePage from a ref so it never goes stale.
+  const deletePageRef = useRef(deletePage)
+  useEffect(() => { deletePageRef.current = deletePage }, [deletePage])
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.key !== 'Delete') return
+      const t = e.target
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
+      deletePageRef.current()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   // --- Loading / error (before the first fetch lands) -------------------------
   if (comics === null) {
@@ -925,11 +992,25 @@ export default function ComicEditor({ csrfToken }) {
               grid (tile size = `--tile`, set inline), fully in = one tile
               filling the section width. */}
           <div className="pages-section" ref={pagesSectionRef}>
-            <h3 style={{ margin: '18px 0 8px' }}>
+            {/* Step 12.5a — the heading row is flex; the always-visible
+                "Delete" pill sits right-aligned (the h3 spans the section
+                width, so its right edge IS the tiles' right margin) and
+                deletes the ACTIVE page. The Delete key does the same. */}
+            <h3 className="pages-heading">
               Pages
               {selectedComic ? <span> — {selectedComic.title}</span> : null}
               <span className="muted" style={{ fontWeight: 400 }}> ({selectedPages.length})</span>
               {reordering ? <span className="muted" style={{ fontWeight: 400 }}> — reordering…</span> : null}
+              <button
+                type="button"
+                className="pages-delete-btn"
+                title="Delete the active page (the Delete key does the same)"
+                disabled={selectedPages.length === 0 || deleting}
+                onClick={() => deletePage(activePageId)}
+              >
+                <PageBinIcon />
+                Delete
+              </button>
             </h3>
 
             {selectedPages.length === 0 ? (
@@ -958,6 +1039,14 @@ export default function ComicEditor({ csrfToken }) {
                       >
                         <span className="page-list-num">Page {p.page_number}</span>
                         <span className="page-list-name">{fileNameOf(p.file_path)}</span>
+                        {/* Step 12.5a — hover bin at the row's right edge
+                            (consistency across zoom regimes); surgical:
+                            deletes THIS page, never the active one. */}
+                        <PageBin
+                          title={`Delete page ${p.page_number} (${fileNameOf(p.file_path)})`}
+                          disabled={deleting}
+                          onClick={e => { e.stopPropagation(); deletePage(p.id) }}
+                        />
                       </li>
                     )
                   }
@@ -986,6 +1075,14 @@ export default function ComicEditor({ csrfToken }) {
                     >
                       <img src={p.file_path} alt={`Page ${p.page_number}`} />
                       <span className="page-tile-label">Page {p.page_number}</span>
+                      {/* Step 12.5a — semi-transparent hover bin, top-right;
+                          surgical: deletes THIS page (stopPropagation keeps
+                          it from activating the page under the cursor). */}
+                      <PageBin
+                        title={`Delete page ${p.page_number} (${fileNameOf(p.file_path)})`}
+                        disabled={deleting}
+                        onClick={e => { e.stopPropagation(); deletePage(p.id) }}
+                      />
                     </li>
                   )
                 })}
@@ -1056,6 +1153,15 @@ export default function ComicEditor({ csrfToken }) {
                     onDragStart={e => onRowDragStart(e, p)}
                     onDragEnd={clearDrag}
                   >
+                    {/* Step 12.5a — hover bin, top-right (slight overhang;
+                        visible on hover only — NOT pinned when active);
+                        surgical: deletes THIS page even if it is not the
+                        active one. */}
+                    <PageBin
+                      title={`Delete page ${p.page_number} (${fileNameOf(p.file_path)})`}
+                      disabled={deleting}
+                      onClick={e => { e.stopPropagation(); deletePage(p.id) }}
+                    />
                     {isActive ? (
                       /* Step 8 — the caption editor lives HERE: the (Step-4,
                          unchanged) caption input above the ACTIVE page's image,
@@ -1074,20 +1180,6 @@ export default function ComicEditor({ csrfToken }) {
                         {captionSave === 'saving' ? <span className="caption-status muted">Saving caption…</span> : null}
                         {captionSave === 'saved' ? <span className="caption-status muted">Caption saved</span> : null}
                         {captionSave === 'error' ? <span className="caption-status error">{captionError}</span> : null}
-                        {/* Step 12 — delete the ACTIVE page (server renumbers
-                            the rest to a clean 1..N; a confirm guards the
-                            irreversible delete). */}
-                        <div className="page-delete-row">
-                          <button
-                            type="button"
-                            className="delete-page-btn"
-                            title="Delete this page — the remaining pages renumber"
-                            disabled={deleting}
-                            onClick={deleteActivePage}
-                          >
-                            {deleting ? 'Deleting…' : `Delete page ${p.page_number}`}
-                          </button>
-                        </div>
                       </>
                     ) : (
                       p.caption ? <figcaption className="page-caption">{p.caption}</figcaption> : null

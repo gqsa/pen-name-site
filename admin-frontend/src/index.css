@@ -97,7 +97,9 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
                        (one tile at a time — the section scrolls to the next). */
 .page-grid--fill { grid-template-columns: 1fr; }
 .page-grid--list { display: block; }
-.page-list-item { display: flex; align-items: baseline; gap: 8px; padding: 6px 8px; margin: 0 0 6px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+/* Step 12.5a — `position: relative` + right padding anchor the hover bin at
+   the row's right edge (`.page-bin` is absolutely placed). */
+.page-list-item { position: relative; display: flex; align-items: baseline; gap: 8px; padding: 6px 34px 6px 8px; margin: 0 0 6px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
 .page-list-item:hover { border-color: var(--accent); }
 .page-list-item--active { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent-soft); }
 .page-list-num { font-weight: 600; flex: 0 0 auto; }
@@ -115,19 +117,59 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 .caption-input { margin: 0 0 8px; font-size: .95rem; }
 .caption-status { display: block; margin: 0 0 8px; font-size: .8rem; font-weight: 400; line-height: 1.3; }
 
-/* Step 12 — the "Delete page N" button under the caption editor (active
-   figure only). Small pill, same family as `.preview-toggle`; danger
-   semantics = accent red: outline at rest, filled on hover. */
-.page-delete-row { margin: 2px 0 10px; }
-.delete-page-btn { padding: 4px 12px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--muted); }
-.delete-page-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
-.delete-page-btn:disabled { opacity: .6; cursor: wait; }
+/* Step 12.5a — the delete affordances (replaces the Step-12 text button):
+   a hover trash bin on each PREVIEW page (top-right, slight overhang), on
+   each TILE (top-right, semi-transparent over the image) and on each
+   zoomed-out LIST row (right edge) — each deletes the page it points at;
+   plus the always-visible "Delete" pill in the Pages heading row (deletes
+   the ACTIVE page; the Delete key does the same). The bin is invisible
+   until its parent is hovered (opacity + pointer-events); it is hidden
+   again while a delete is in flight (:disabled). */
+.page-bin {
+  position: absolute;
+  top: 4px; right: 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; margin: 0;
+  border: 1px solid rgba(0, 0, 0, .55); border-radius: 50%;
+  background: rgba(13, 13, 13, .68);
+  color: var(--ink);
+  cursor: pointer;
+  opacity: 0; pointer-events: none;
+  transition: opacity .12s ease, background .12s ease;
+  z-index: 2;
+}
+.page-bin:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+.page-bin:disabled { opacity: 0; cursor: default; pointer-events: none; }
+.page-tile:hover .page-bin:not(:disabled),
+.page-list-item:hover .page-bin:not(:disabled) { opacity: 1; pointer-events: auto; }
+.preview-figure:hover .page-bin:not(:disabled) { opacity: .95; pointer-events: auto; }
+/* the preview page's bin overhangs the figure slightly (top-right). */
+.preview-figure .page-bin { top: -10px; right: -10px; }
+/* the list-row bin sits at the row's right edge, vertically centred. */
+.page-list-item .page-bin { top: 50%; right: 5px; transform: translateY(-50%); width: 22px; height: 22px; }
+
+/* Step 12.5a — the Pages heading row: flex so the always-visible "Delete"
+   pill (bin icon + label, `.preview-toggle` pill family) sits right-aligned
+   — the h3 spans the section width, so its right edge IS the tiles' right
+   margin. */
+.pages-heading { display: flex; align-items: baseline; gap: 8px; margin: 18px 0 8px; }
+.pages-delete-btn {
+  margin-left: auto;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 10px; font-size: 12px; font-weight: 600;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: transparent; color: var(--muted); cursor: pointer;
+}
+.pages-delete-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.pages-delete-btn:disabled { opacity: .5; cursor: default; }
+.pages-delete-btn:disabled:hover { border-color: var(--line); color: var(--muted); background: transparent; }
 
 /* Right pane — the reading preview (larger; caption sits ABOVE the image).
    Step 8 — the figure shrinks to its image (fit-content) and centres in the
    window, so the caption input + cues sit at the image's width, aligned with
    the page (spec: "centred relative to the page width"). */
-.preview-figure { width: fit-content; margin: 0 auto 20px; }
+/* Step 12.5a — `position: relative` anchors the hover bin (top-right). */
+.preview-figure { position: relative; width: fit-content; margin: 0 auto 20px; }
 .preview-thumb { display: block; max-width: 100%; max-height: 420px; width: auto; height: auto; object-fit: contain; background: #000; border-radius: 4px; }
 
 /* Step 2 — the live dropzone (drag / paste / double-click picker).
