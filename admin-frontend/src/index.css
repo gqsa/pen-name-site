@@ -56,7 +56,20 @@ button:disabled { opacity: .55; cursor: default; }
    "Page N" corner label; the file name is the hover tooltip (the title
    attribute — Step 10's zoomed-out file-name list will reuse it). The caption
    editor moved into the preview (Step 8), so a tile carries no caption bar. */
-.page-grid { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+.page-grid { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--tile, 96px), 1fr)); gap: 8px; }
+/* Step 10 — wheel-zoom regimes (the `zoom` state picks the class; the grid
+   regime's tile size is the inline `--tile` custom property).
+   list  (fully out) : a vertical file-name list — no thumbnails.
+   grid  (between)   : the Step-9 grid, tile size = `--tile` (72..260px).
+   fill  (fully in)  : a single column; the 1:1 tile fills the section width
+                       (one tile at a time — the section scrolls to the next). */
+.page-grid--fill { grid-template-columns: 1fr; }
+.page-grid--list { display: block; }
+.page-list-item { display: flex; align-items: baseline; gap: 8px; padding: 6px 8px; margin: 0 0 6px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+.page-list-item:hover { border-color: var(--accent); }
+.page-list-item--active { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent-soft); }
+.page-list-num { font-weight: 600; flex: 0 0 auto; }
+.page-list-name { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .page-tile { position: relative; aspect-ratio: 1/1; border: 1px solid var(--line); border-radius: 8px; background: #000; overflow: hidden; }
 .page-tile img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .page-tile-label { position: absolute; left: 5px; bottom: 5px; padding: 1px 6px; font-size: 11px; line-height: 1.4; background: rgba(0, 0, 0, .72); border-radius: 4px; }

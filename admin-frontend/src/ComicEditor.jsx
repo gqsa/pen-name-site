@@ -98,6 +98,16 @@ function fileNameOf(file_path) {
   return segs.length ? segs[segs.length - 1] : 'image'
 }
 
+// Step 10 — wheel-zoom regime bounds (Windows-folder style). `zoom` runs
+// 0 (fully OUT = a vertical file-name list) .. 100 (fully IN = one tile fills
+// the section); between = the Step-9 grid with a scaled tile size. Shared by
+// the component (state + CSS `--tile`) so the numbers live in one place.
+const ZOOM_LIST_MAX = 20   // zoom <= this → the file-name list (fully out)
+const ZOOM_FILL_MIN = 80   // zoom >= this → one tile fills the section (fully in)
+const ZOOM_STEP = 6        // one wheel notch
+const GRID_TILE_MIN = 72   // px, the grid regime's low end
+const GRID_TILE_MAX = 260  // px, the grid regime's high end
+
 // THE upload call (the house pattern — copied shape, `kind` BEFORE `file`,
 // no Content-Type: the browser sets the multipart boundary).
 async function uploadImage(file, csrfToken) {
@@ -164,6 +174,15 @@ export default function ComicEditor({ csrfToken }) {
   // The scroll is deferred to a post-render effect (in 'active' mode the
   // figure only exists after the re-render), so the intent is flagged here.
   const scrollActiveRef = useRef(false)
+
+  // Step 10 — wheel zoom (the ZOOM_* constants above): `zoom` 0..100,
+  // fully out = a vertical file-name list, fully in = one tile fills the
+  // section, between = the Step-9 grid with a scaled tile size. Default =
+  // mid (the grid), so a fresh view looks like Step 9. The wheel listener
+  // is bound to this (always-present) section wrapper, not the grid itself
+  // (the grid is absent while "No pages yet.").
+  const [zoom, setZoom] = useState(50)
+  const pagesSectionRef = useRef(null)
 
   // Clear the deferred single-click timer if the component unmounts early.
   useEffect(() => () => { if (clickTimer.current) clearTimeout(clickTimer.current) }, [])
@@ -240,6 +259,30 @@ export default function ComicEditor({ csrfToken }) {
     const el = previewRef.current && previewRef.current.querySelector(`[data-page-id="${activePageId}"]`)
     if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }, [activePageId, previewMode])
+
+  // Step 10 — the wheel-zoom listener. NOTE: React's `onWheel` is attached
+  // PASSIVELY, so a `preventDefault()` inside it is ignored (the page behind
+  // would still scroll). A NATIVE non-passive listener is the only way to both
+  // zoom AND stop the page scrolling — the native one stuck, `onWheel`
+  // couldn't. Bound once the section has rendered (`comics !== null`), so the
+  // ref is non-null; re-runs when that flips, cleanup removes the listener.
+  useEffect(() => {
+    if (comics === null) return undefined
+    const el = pagesSectionRef.current
+    if (!el) return undefined
+    const onWheel = (e) => {
+      e.preventDefault()                          // the page behind must NOT scroll
+      const dir = e.deltaY > 0 ? -1 : 1           // wheel down = zoom out, up = in
+      setZoom(z => Math.max(0, Math.min(100, z + dir * ZOOM_STEP)))
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [comics])
+
+  // Step 10 — on a comic switch, reset the zoom to the default (mid grid).
+  // Chosen over "keep" (noted per the step): a new comic is a new view, so a
+  // fresh zoom is less surprising. (Also runs on first mount — a no-op.)
+  useEffect(() => { setZoom(50) }, [selectedId])
 
   const createComic = useCallback(async () => {
     const title = newTitle.trim()
@@ -713,6 +756,16 @@ export default function ComicEditor({ csrfToken }) {
 
   const selectedComic = comics.find(c => c.id === selectedId) || null
 
+  // Step 10 — derive the zoom regime + the grid tile size for THIS render:
+  // low = a file-name list, mid = the grid (tile = `--tile` px), high = one
+  // full-width tile. `tilePx` is linear across the grid regime (20..80 →
+  // 72..260px).
+  const zoomRegime = zoom <= ZOOM_LIST_MAX ? 'list'
+    : zoom >= ZOOM_FILL_MIN ? 'fill'
+    : 'grid'
+  const zoomT = Math.max(0, Math.min(1, (zoom - ZOOM_LIST_MAX) / (ZOOM_FILL_MIN - ZOOM_LIST_MAX)))
+  const tilePx = Math.round(GRID_TILE_MIN + zoomT * (GRID_TILE_MAX - GRID_TILE_MIN))
+
   return (
     <section className="comic-editor">
       <h2>Comic editor</h2>
@@ -792,51 +845,80 @@ export default function ComicEditor({ csrfToken }) {
             onChange={onFilePicked}
           />
 
-          <h3 style={{ margin: '18px 0 8px' }}>
-            Pages
-            {selectedComic ? <span> — {selectedComic.title}</span> : null}
-            <span className="muted" style={{ fontWeight: 400 }}> ({selectedPages.length})</span>
-            {reordering ? <span className="muted" style={{ fontWeight: 400 }}> — reordering…</span> : null}
-          </h3>
+          {/* Step 10 — the pages SECTION (wheel-zoom target; the native
+              non-passive `wheel` listener is bound to this wrapper). Inside:
+              the Pages heading + the pages surface, whose regime follows
+              `zoom` — fully out = a file-name list, between = the Step-9
+              grid (tile size = `--tile`, set inline), fully in = one tile
+              filling the section width. */}
+          <div className="pages-section" ref={pagesSectionRef}>
+            <h3 style={{ margin: '18px 0 8px' }}>
+              Pages
+              {selectedComic ? <span> — {selectedComic.title}</span> : null}
+              <span className="muted" style={{ fontWeight: 400 }}> ({selectedPages.length})</span>
+              {reordering ? <span className="muted" style={{ fontWeight: 400 }}> — reordering…</span> : null}
+            </h3>
 
-          {selectedPages.length === 0 ? (
-            <p className="muted">No pages yet.</p>
-          ) : (
-            // Step 9 — a grid of fixed SQUARE (1:1) tiles (`.page-grid`):
-            // many pages at once (≥5/row), a "Page N" corner label, the file
-            // name as the hover tooltip, the Step-7 active highlight +
-            // click-to-activate, and the Step-3 reorder DnD all on the tiles
-            // (tile drop = that position, grid-body drop = last).
-            <ul
-              className="page-grid"
-              onDragOver={onRowDragOver}
-              onDrop={onListDrop}
-            >
-              {selectedPages.map(p => (
-                <li
-                  key={p.id}
-                  data-page-id={p.id}
-                  className={
-                    'page-tile'
-                    + (activePageId === p.id ? ' page-tile--active' : '')
-                    + (draggingId === p.id ? ' page-tile--dragging' : '')
-                    + (dragOverId === p.id && draggingId !== null && draggingId !== p.id ? ' page-tile--drop-target' : '')
+            {selectedPages.length === 0 ? (
+              <p className="muted">No pages yet.</p>
+            ) : (
+              <ul
+                className={'page-grid page-grid--' + zoomRegime}
+                style={zoomRegime === 'grid' ? { '--tile': tilePx + 'px' } : undefined}
+                onDragOver={onRowDragOver}
+                onDrop={onListDrop}
+              >
+                {selectedPages.map(p => {
+                  const isActive = activePageId === p.id
+                  if (zoomRegime === 'list') {
+                    // Step 10 — fully zoomed OUT: a vertical file-name list
+                    // (no thumbnails). Click still activates + centres the
+                    // page in the preview; the reorder DnD lives in the
+                    // grid/fill regimes (nothing is draggable here).
+                    return (
+                      <li
+                        key={p.id}
+                        data-page-id={p.id}
+                        className={'page-list-item' + (isActive ? ' page-list-item--active' : '')}
+                        title={`${fileNameOf(p.file_path)} — click to activate`}
+                        onClick={() => onListRowClick(p.id)}
+                      >
+                        <span className="page-list-num">Page {p.page_number}</span>
+                        <span className="page-list-name">{fileNameOf(p.file_path)}</span>
+                      </li>
+                    )
                   }
-                  draggable
-                  title={`${fileNameOf(p.file_path)} — click to activate · drag to reorder`}
-                  onClick={() => onListRowClick(p.id)}
-                  onDragStart={e => onRowDragStart(e, p)}
-                  onDragEnd={clearDrag}
-                  onDragOver={onRowDragOver}
-                  onDragLeave={onRowDragLeave}
-                  onDrop={e => onRowDrop(e, p)}
-                >
-                  <img src={p.file_path} alt={`Page ${p.page_number}`} />
-                  <span className="page-tile-label">Page {p.page_number}</span>
-                </li>
-              ))}
-            </ul>
-          )}
+                  // grid + fill — the Step-9 tile (square 1:1, image
+                  // object-fit contain, "Page N" corner label, active
+                  // highlight + click-to-activate, Step-3 reorder DnD;
+                  // fill regime = one full-width tile via the CSS class).
+                  return (
+                    <li
+                      key={p.id}
+                      data-page-id={p.id}
+                      className={
+                        'page-tile'
+                        + (isActive ? ' page-tile--active' : '')
+                        + (draggingId === p.id ? ' page-tile--dragging' : '')
+                        + (dragOverId === p.id && draggingId !== null && draggingId !== p.id ? ' page-tile--drop-target' : '')
+                      }
+                      draggable
+                      title={`${fileNameOf(p.file_path)} — click to activate · drag to reorder`}
+                      onClick={() => onListRowClick(p.id)}
+                      onDragStart={e => onRowDragStart(e, p)}
+                      onDragEnd={clearDrag}
+                      onDragOver={onRowDragOver}
+                      onDragLeave={onRowDragLeave}
+                      onDrop={e => onRowDrop(e, p)}
+                    >
+                      <img src={p.file_path} alt={`Page ${p.page_number}`} />
+                      <span className="page-tile-label">Page {p.page_number}</span>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </div>
         </div>
 
         {/* RIGHT — the live preview (Step 7): a BOUNDED window that scrolls
