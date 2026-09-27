@@ -105,3 +105,8 @@ button:disabled { opacity: .55; cursor: default; }
 .page-tile--active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .preview-figure { cursor: pointer; }
 .preview-figure--active .preview-thumb { box-shadow: 0 0 0 2px var(--accent); }
+/* Step 9.5 — the preview's insertion-slot indicator (a figure drag, or a
+   tile drag dropped into the preview): a solid red bar on the edge of the
+   figure the drop would land BEFORE (bar above it) / AFTER (bar below it). */
+.preview-figure--drop-before { box-shadow: 0 -5px 0 0 var(--accent); }
+.preview-figure--drop-after { box-shadow: 0 5px 0 0 var(--accent); }

@@ -41,6 +41,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 //     DnD all living on the tiles. Step 10 adds wheel zoom on top; Step 14 adds
 //     file-insertion — the two paths stay separable (a reorder drag carries
 //     `text/plain`, never `Files`; an OS file drag never lifts a tile).
+//   • Step 9.5 — the PREVIEW is a second reorder surface: figures are
+//     draggable (the SAME onRowDragStart / reorder() as the tiles), a
+//     dragover shows the insertion slot as a red bar above/below the target
+//     figure (slot = first figure whose vertical midpoint is below the
+//     pointer, else last), the window auto-scrolls when the pointer nears
+//     its top/bottom edge, and a drop maps the visible slot onto the FULL
+//     page list (matters in "active page only" mode, which shows a subset).
+//     Cross-pane works for free: a tile drag drops on the preview and a
+//     figure drag drops on the tiles — one dragIdRef, one reorder(), so the
+//     two panes can never disagree.
 //
 // Still NOT here: B4 marquee / crop selection (a later step).
 // Keep the state shape stable.
@@ -134,6 +144,10 @@ export default function ComicEditor({ csrfToken }) {
   const [reordering, setReordering] = useState(false)  // "Reordering…" cue near the Pages heading
   const reorderingRef = useRef(false)                   // authoritative in-flight guard (ref = always current)
   const dragIdRef = useRef(null)                        // the dragged page id (ref = stable across renders)
+  // Step 9.5 — the preview's insertion slot: the index (into the VISIBLE
+  // figure list) where a drop would land, or null when no preview dragover
+  // is in progress. Drives the red before/after bar on the target figure.
+  const [previewDropIdx, setPreviewDropIdx] = useState(null)
 
   // Step 4 — caption auto-save state.
   const captionTimers = useRef({})                       // page id → pending debounce timeout (per page, so one page's timer can't clobber another's)
@@ -187,6 +201,14 @@ export default function ComicEditor({ csrfToken }) {
       .filter(p => p.comic_id === selectedId)
       .sort((a, b) => a.page_number - b.page_number)
   }, [pages, selectedId])
+
+  // Step 9.5 — the pages the preview window SHOWS (all of them, or just the
+  // active page in "active page only" mode). One place computes it: the
+  // preview map and the drop slot→full-index mapping both read it, so the
+  // indicator, the dragover math, and the drop can't drift apart.
+  const visiblePages = previewMode === 'active'
+    ? selectedPages.filter(p => p.id === activePageId)
+    : selectedPages
 
   // Step 7 — keep the active page VALID. On first load, a comic switch, or a
   // page deletion the active id may no longer be one of the selected comic's
@@ -454,6 +476,7 @@ export default function ComicEditor({ csrfToken }) {
     dragIdRef.current = null
     setDraggingId(null)
     setDragOverId(null)
+    setPreviewDropIdx(null)
   }, [])
 
   const onRowDragStart = useCallback((e, page) => {
@@ -555,6 +578,70 @@ export default function ComicEditor({ csrfToken }) {
     const without = selectedPages.filter(p => p.id !== draggedId)
     reorder([...without, dragged])
   }, [selectedPages, clearDrag, reorder])
+
+  // --- Step 9.5: drag-reorder on the PREVIEW ----------------------------------
+  //
+  // The preview window is a SECOND reorder surface (and a cross-pane drop
+  // target for tile drags, and vice versa — see the onRowDragStart/onRowDrop
+  // above: one dragIdRef + one reorder() means the panes can't disagree):
+  //   • each figure is draggable via the SAME onRowDragStart as the tiles
+  //     (a drag started on a caption input is still refused — the closest()
+  //     guard covers it),
+  //   • dragover ANYWHERE in the window → the insertion slot = the first
+  //     figure whose vertical midpoint sits BELOW the pointer (else: last),
+  //     rendered as a red bar on that figure (before = above, after = below),
+  //   • pointer within EDGE px of the window's top/bottom edge → the window
+  //     auto-scrolls. dragover fires repeatedly while hovering, so a fixed
+  //     step per event reads as a steady scroll,
+  //   • drop → reorder() with the FULL page list: the slot is an index into
+  //     the VISIBLE list (visiblePages), mapped onto selectedPages — in
+  //     "all" mode that's 1:1, in "active page only" mode it's a subset.
+
+  const onPreviewDragOver = useCallback((e) => {
+    if (dragIdRef.current === null) return   // not our drag (e.g. a file drag)
+    e.preventDefault()                        // REQUIRED for the drop to be allowed
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+    const scroller = previewRef.current
+    if (!scroller) return
+    // Auto-scroll near the window's top/bottom edge (14px per event).
+    const rect = scroller.getBoundingClientRect()
+    const EDGE = 70
+    if (e.clientY < rect.top + EDGE) scroller.scrollTop -= 14
+    else if (e.clientY > rect.bottom - EDGE) scroller.scrollTop += 14
+    // Insertion slot = the first figure whose vertical midpoint is below the
+    // pointer (else: after the last figure).
+    const figures = Array.from(scroller.querySelectorAll('.preview-figure'))
+    let idx = figures.length
+    for (let i = 0; i < figures.length; i++) {
+      const r = figures[i].getBoundingClientRect()
+      if (e.clientY < r.top + r.height / 2) { idx = i; break }
+    }
+    setPreviewDropIdx(idx)
+  }, [])
+
+  const onPreviewDragLeave = useCallback((e) => {
+    // dragleave fires when the pointer moves onto a child — ignore that.
+    if (e.relatedTarget && e.currentTarget.contains(e.relatedTarget)) return
+    setPreviewDropIdx(null)
+  }, [])
+
+  const onPreviewDrop = useCallback((e) => {
+    e.preventDefault()
+    const draggedId = dragIdRef.current
+    const slot = previewDropIdx
+    clearDrag()
+    if (draggedId === null || reorderingRef.current || slot === null) return
+    const dragged = selectedPages.find(p => p.id === draggedId)
+    if (!dragged || visiblePages.length === 0) return
+    // Map the VISIBLE-list slot onto the FULL list ("all" mode is 1:1;
+    // "active page only" shows a subset).
+    const fullIdx = slot >= visiblePages.length
+      ? selectedPages.findIndex(p => p.id === visiblePages[visiblePages.length - 1].id) + 1
+      : selectedPages.findIndex(p => p.id === visiblePages[slot].id)
+    const without = selectedPages.filter(p => p.id !== draggedId)
+    const at = Math.max(0, Math.min(without.length, fullIdx))
+    reorder([...without.slice(0, at), dragged, ...without.slice(at)])
+  }, [previewDropIdx, selectedPages, visiblePages, clearDrag, reorder])
 
   // --- Step 4: caption auto-save ------------------------------------------------
   //
@@ -781,19 +868,38 @@ export default function ComicEditor({ csrfToken }) {
           {selectedPages.length === 0 ? (
             <p className="muted">No pages yet.</p>
           ) : (
-            <div className="comic-preview" ref={previewRef}>
-              {(previewMode === 'active'
-                ? selectedPages.filter(p => p.id === activePageId)
-                : selectedPages
-              ).map(p => {
+            <div
+              className="comic-preview"
+              ref={previewRef}
+              onDragOver={onPreviewDragOver}
+              onDragLeave={onPreviewDragLeave}
+              onDrop={onPreviewDrop}
+            >
+              {visiblePages.map((p, i) => {
                 const isActive = activePageId === p.id
+                // Step 9.5 — the insertion-slot bar (above = before this
+                // figure, below = after). Never shown on a no-op slot (before
+                // or after the dragged figure itself).
+                const dragVisIdx = draggingId !== null
+                  ? visiblePages.findIndex(q => q.id === draggingId)
+                  : -1
+                const showBefore = previewDropIdx === i && dragVisIdx !== i
+                const showAfter = previewDropIdx === i + 1 && dragVisIdx !== i - 1
                 return (
                   <figure
                     key={p.id}
                     data-page-id={p.id}
-                    className={'preview-figure' + (isActive ? ' preview-figure--active' : '')}
-                    title="Click to make this the active page"
+                    className={
+                      'preview-figure'
+                      + (isActive ? ' preview-figure--active' : '')
+                      + (showBefore ? ' preview-figure--drop-before' : '')
+                      + (showAfter ? ' preview-figure--drop-after' : '')
+                    }
+                    title="Click to make this the active page · drag to reorder"
                     onClick={() => setActivePageId(p.id)}
+                    draggable
+                    onDragStart={e => onRowDragStart(e, p)}
+                    onDragEnd={clearDrag}
                   >
                     {isActive ? (
                       /* Step 8 — the caption editor lives HERE: the (Step-4,
