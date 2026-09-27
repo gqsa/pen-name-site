@@ -5,8 +5,11 @@ services:
   - type: web
     name: pen-name-site
     env: node
-    # Build command: install all npm dependencies listed in package.json
-    buildCommand: npm install
+    # Build command: install all npm dependencies (root + the admin-frontend
+    # workspace), then build the React admin bundle into admin-frontend/dist —
+    # which is gitignored, so on a fresh Render disk it does not exist until
+    # this runs (server.js /admin falls back to the EJS page without it, B2.2).
+    buildCommand: npm install && npm run build:admin
     # Start command: run the server (Render sets PORT automatically)
     startCommand: node server.js
     # Health check: Render will ping this URL to verify the app is running
