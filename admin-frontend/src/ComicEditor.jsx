@@ -787,6 +787,17 @@ export default function ComicEditor({ csrfToken }) {
     }, 600)
   }, [saveCaption, captionSave])
 
+  // 2026-09-27 user tweak — the "Caption saved" cue is a MOMENT, not a state:
+  // it shows in the preview toolbar (next to the active-page toggle) and fades
+  // out after ~3 s. Previously it was pinned under the active page's caption
+  // box and STUCK there — the state is per-editor, not per-page, so it even
+  // followed the active page onto pages that had never been saved.
+  useEffect(() => {
+    if (captionSave !== 'saved') return undefined
+    const t = setTimeout(() => setCaptionSave(null), 3000)
+    return () => clearTimeout(t)
+  }, [captionSave])
+
   // --- Step 12 (+ 12.5a): delete a page (the server renumbers the rest) ------
   //
   // One pipeline, THREE affordances, all funnel into deletePage(pageId):
@@ -1097,7 +1108,7 @@ export default function ComicEditor({ csrfToken }) {
             centres a page; a figure click activates + highlights its row.
             The toggle switches between ALL pages and the ACTIVE page only. */}
         <div className="comic-right">
-          <h3 style={{ margin: '18px 0 8px' }}>
+          <h3 className="preview-heading" style={{ margin: '18px 0 8px' }}>
             Preview
             <button
               type="button"
@@ -1116,6 +1127,21 @@ export default function ComicEditor({ csrfToken }) {
             >
               active page only
             </button>
+            {/* 2026-09-27 user tweak — the transient save cues (Saving… /
+                Caption saved) live here, next to the toggle, instead of under
+                the caption box; 'Caption saved' auto-hides after ~3 s (the
+                effect sits with the caption-save state). Only a FAILED save
+                stays under the box. */}
+            {captionSave === 'saving' ? (
+              <span className="caption-status muted" role="status">
+                Saving caption…
+              </span>
+            ) : null}
+            {captionSave === 'saved' ? (
+              <span className="caption-status muted" role="status">
+                Caption saved
+              </span>
+            ) : null}
           </h3>
           {selectedPages.length === 0 ? (
             <p className="muted">No pages yet.</p>
@@ -1153,15 +1179,6 @@ export default function ComicEditor({ csrfToken }) {
                     onDragStart={e => onRowDragStart(e, p)}
                     onDragEnd={clearDrag}
                   >
-                    {/* Step 12.5a — hover bin, top-right (slight overhang;
-                        visible on hover only — NOT pinned when active);
-                        surgical: deletes THIS page even if it is not the
-                        active one. */}
-                    <PageBin
-                      title={`Delete page ${p.page_number} (${fileNameOf(p.file_path)})`}
-                      disabled={deleting}
-                      onClick={e => { e.stopPropagation(); deletePage(p.id) }}
-                    />
                     {isActive ? (
                       /* Step 8 — the caption editor lives HERE: the (Step-4,
                          unchanged) caption input above the ACTIVE page's image,
@@ -1177,14 +1194,33 @@ export default function ComicEditor({ csrfToken }) {
                           aria-label={`Caption for page ${p.page_number}`}
                           onChange={e => onCaptionChange(p, e.target.value)}
                         />
-                        {captionSave === 'saving' ? <span className="caption-status muted">Saving caption…</span> : null}
-                        {captionSave === 'saved' ? <span className="caption-status muted">Caption saved</span> : null}
+                        {/* 2026-09-27 user tweak — 'Saving…' + 'Caption saved' now
+                            live in the preview toolbar (next to the active-page
+                            toggle) and the saved cue auto-hides after ~3 s (the
+                            state is per-editor, not per-page, so a stuck 'saved'
+                            cue was following the active page onto pages that had
+                            never been saved). Only a FAILED save stays here,
+                            beside the box it belongs to. */}
                         {captionSave === 'error' ? <span className="caption-status error">{captionError}</span> : null}
                       </>
                     ) : (
                       p.caption ? <figcaption className="page-caption">{p.caption}</figcaption> : null
                     )}
-                    <img className="preview-thumb" src={p.file_path} alt={`Page ${p.page_number}`} />
+                    {/* 2026-09-27 user tweak — the bin lives INSIDE this wrapper,
+                        so its top-right corner is the IMAGE's top-right on EVERY
+                        page. It used to anchor to the figure's corner, which on
+                        the active page is the caption box's corner (the bin
+                        floated over the caption input). Hover reveal is scoped
+                        to the image now, not the caption box. Still surgical:
+                        deletes THIS page even if it is not the active one. */}
+                    <div className="preview-imgwrap">
+                      <PageBin
+                        title={`Delete page ${p.page_number} (${fileNameOf(p.file_path)})`}
+                        disabled={deleting}
+                        onClick={e => { e.stopPropagation(); deletePage(p.id) }}
+                      />
+                      <img className="preview-thumb" src={p.file_path} alt={`Page ${p.page_number}`} />
+                    </div>
                   </figure>
                 )
               })}

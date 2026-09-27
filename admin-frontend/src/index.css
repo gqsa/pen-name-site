@@ -116,6 +116,12 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    is the saving/saved/error cue, kept beside the input. */
 .caption-input { margin: 0 0 8px; font-size: .95rem; }
 .caption-status { display: block; margin: 0 0 8px; font-size: .8rem; font-weight: 400; line-height: 1.3; }
+/* 2026-09-27 user tweak — the transient save cues ('Saving…' / 'Caption
+   saved') now sit in the "Preview" heading row, next to the active-page
+   toggle: inline with the heading, not stacked under the caption box. The
+   FAILED-save cue keeps the block style (it stays beside the box it
+   belongs to). */
+.preview-heading .caption-status { display: inline-block; margin: 0 0 0 10px; vertical-align: middle; font-size: 12px; }
 
 /* Step 12.5a — the delete affordances (replaces the Step-12 text button):
    a hover trash bin on each PREVIEW page (top-right, slight overhang), on
@@ -142,9 +148,14 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 .page-bin:disabled { opacity: 0; cursor: default; pointer-events: none; }
 .page-tile:hover .page-bin:not(:disabled),
 .page-list-item:hover .page-bin:not(:disabled) { opacity: 1; pointer-events: auto; }
-.preview-figure:hover .page-bin:not(:disabled) { opacity: .95; pointer-events: auto; }
-/* the preview page's bin overhangs the figure slightly (top-right). */
-.preview-figure .page-bin { top: -10px; right: -10px; }
+.preview-imgwrap:hover .page-bin:not(:disabled) { opacity: .95; pointer-events: auto; }
+/* 2026-09-27 user tweak — the preview bin anchors to the IMAGE (inside
+   .preview-imgwrap), so it sits at the image's top-right on EVERY page,
+   including the active one. It used to anchor to the figure, which on the
+   active page is the caption box's corner — the bin floated over the caption
+   input. Hover reveal is scoped to the image now, not the caption box. */
+.preview-imgwrap { position: relative; }
+.preview-imgwrap .page-bin { top: -10px; right: -10px; }
 /* the list-row bin sits at the row's right edge, vertically centred. */
 .page-list-item .page-bin { top: 50%; right: 5px; transform: translateY(-50%); width: 22px; height: 22px; }
 
@@ -168,7 +179,8 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    Step 8 — the figure shrinks to its image (fit-content) and centres in the
    window, so the caption input + cues sit at the image's width, aligned with
    the page (spec: "centred relative to the page width"). */
-/* Step 12.5a — `position: relative` anchors the hover bin (top-right). */
+/* 2026-09-27 user tweak — `position: relative` is retained; the hover bin
+   now anchors to .preview-imgwrap (the image), not the figure. */
 .preview-figure { position: relative; width: fit-content; margin: 0 auto 20px; }
 .preview-thumb { display: block; max-width: 100%; max-height: 420px; width: auto; height: auto; object-fit: contain; background: #000; border-radius: 4px; }
 
