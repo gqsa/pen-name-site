@@ -5,13 +5,17 @@
   "main": "server.js",
   "type": "module",
   "private": true,
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "workspaces": [
     "admin-frontend"
   ],
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "build:admin": "npm run build -w admin-frontend"
+    "build:admin": "npm run build -w admin-frontend",
+    "postinstall": "npm run build:admin"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
