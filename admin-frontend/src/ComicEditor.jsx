@@ -72,6 +72,16 @@ import ResizableSection from './ResizableSection.jsx'
 //     DELETEs (stable ids, no backend change), ONE optimistic splice+renumber,
 //     and a whole-batch rollback if any delete fails. Esc collapses the
 //     selection back to the primary.
+//   • Step 12.5d — arrow-key navigation (simple Windows behaviour): a PLAIN
+//     arrow moves the active page to the neighbour in that direction and
+//     clears any multi-selection — the neighbour is a true GRID cell (one
+//     row/column, clamped at the edges) when the selection was last made on
+//     the PAGES window, or the PREVIOUS/NEXT page in page order when it was
+//     made in the PREVIEW (page 8 → Up → page 7, not whatever tile sits
+//     physically above). SHIFT+arrow grows and SHRINKS the selection as the
+//     range from the anchor to the neighbour (moving back to the anchor
+//     deselects); Shift+click selects the anchor→page range. Ctrl+click
+//     still toggles. All of it is inert while a text field has focus.
 //
 // Still NOT here: B4 marquee / crop selection (a later step).
 // Keep the state shape stable.
@@ -224,10 +234,22 @@ export default function ComicEditor({ csrfToken }) {
   // activePageId is a PAGE id (a number). `selectedId` stays the COMIC — the
   // two must not be conflated (round-2 confirmed UX contract).
   const [activePageId, setActivePageId] = useState(null)
+  const activePageIdRef = useRef(activePageId)
+  useEffect(() => { activePageIdRef.current = activePageId }, [activePageId])
   // Step 12.5b — the MULTI-SELECTION: an array of page ids in click order
   // (last = newest = the primary). A plain click resets it to [that page];
   // a Ctrl/Cmd+click toggles the page in it. Empty = no multi-selection.
   const [selectedIds, setSelectedIds] = useState([])
+  // Step 12.5d — arrow-key navigation context (refs ONLY — nothing in the UI
+  // reads them, so no state / re-render): `lastSurfaceRef` = WHERE the last
+  // selection action was made ('pages' = a tile/row click → the neighbour is
+  // a grid cell; 'preview' = a figure click → the neighbour is the previous /
+  // next page in page order); `anchorRef` = the page the Shift+arrow /
+  // Shift+click RANGE grows and shrinks around (a plain click or plain arrow
+  // re-anchors there; a Ctrl+click leaves it). A stale anchor (page deleted,
+  // comic switched) falls back to the active page at use time.
+  const lastSurfaceRef = useRef('pages')
+  const anchorRef = useRef(null)
   const [previewMode, setPreviewMode] = useState('all')  // 'all' (default) | 'active'
   const previewRef = useRef(null)                        // the .comic-preview window (the scroll target)
   // A list-row click asked for the active figure to be centred in the window.
@@ -284,6 +306,8 @@ export default function ComicEditor({ csrfToken }) {
       .filter(p => p.comic_id === selectedId)
       .sort((a, b) => a.page_number - b.page_number)
   }, [pages, selectedId])
+  const selectedPagesRef = useRef(selectedPages)
+  useEffect(() => { selectedPagesRef.current = selectedPages }, [selectedPages])
 
   // Step 9.5 — the pages the preview window SHOWS (all of them, or just the
   // active page in "active page only" mode). One place computes it: the
@@ -336,28 +360,54 @@ export default function ComicEditor({ csrfToken }) {
 
   // Step 7 — two-way sync, list → preview: a click makes that page the active
   // one and centres its figure inside the preview window. Step 12.5b adds the
-  // MULTI-SELECT: a PLAIN click keeps today's behaviour (active + a single-page
-  // selection); a Ctrl/Cmd+click TOGGLES the page in the selection (added at
-  // the end = newest = primary) and makes it the active page.
-  const onListRowClick = useCallback((e, pageId) => {
+  // MULTI-SELECT (a PLAIN click = the single page; a Ctrl/Cmd+click TOGGLES
+  // the page in the selection; the last click is the PRIMARY). Step 12.5d
+  // adds the ANCHOR (a plain click re-anchors there; a Ctrl+click leaves it)
+  // and records the SURFACE the click happened on (a tile/row = 'pages', a
+  // preview figure = 'preview' — passed as the 3rd arg) — that decides what
+  // "the neighbour in that direction" means for the arrow keys.
+  const onListRowClick = useCallback((e, pageId, surface) => {
     scrollActiveRef.current = true
-    if (e && (e.ctrlKey || e.metaKey)) {
+    lastSurfaceRef.current = surface || 'pages'
+    const ctrl = !!(e && (e.ctrlKey || e.metaKey))
+    const shift = !!(e && e.shiftKey)
+    const pages = selectedPagesRef.current
+    if (ctrl && !shift) {
+      // CTRL+click — toggle this page in the selection (added at the end =
+      // newest = primary); the anchor stays where it is.
       setSelectedIds(prev => (prev.includes(pageId)
         ? prev.filter(id => id !== pageId)     // toggle OFF
         : [...prev, pageId]))                  // toggle ON (end = newest)
+    } else if (shift && !ctrl) {
+      // SHIFT+click — the page-order range between the anchor (fallback: the
+      // active page) and this page, inclusive (Windows Explorer).
+      let aIdx = pages.findIndex(p => p.id === anchorRef.current)
+      const bIdx = pages.findIndex(p => p.id === pageId)
+      if (aIdx === -1) aIdx = pages.findIndex(p => p.id === activePageIdRef.current)
+      if (aIdx !== -1 && bIdx !== -1) {
+        const [lo, hi] = aIdx < bIdx ? [aIdx, bIdx] : [bIdx, aIdx]
+        setSelectedIds(pages.slice(lo, hi + 1).map(p => p.id))
+      }
     } else {
-      setSelectedIds([pageId])                 // plain click = single selection
+      // plain click — the single page, and the new anchor
+      setSelectedIds([pageId])
+      anchorRef.current = pageId
     }
     setActivePageId(pageId)                    // last-clicked = primary
   }, [])
 
   // Runs AFTER React has rendered the (possibly newly visible) active figure —
-  // in 'active' mode it only exists post-render — and centres it in the window.
+  // in 'active' mode it only exists post-render — and brings the active page
+  // into view: centred in the PREVIEW window, and (Step 12.5d) the active
+  // TILE / list row in the pages window scrolled to the edge — 'nearest' is a
+  // no-op when it is already visible (a plain click on it).
   useEffect(() => {
     if (!scrollActiveRef.current) return
     scrollActiveRef.current = false
-    const el = previewRef.current && previewRef.current.querySelector(`[data-page-id="${activePageId}"]`)
-    if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    const fig = previewRef.current && previewRef.current.querySelector(`[data-page-id="${activePageId}"]`)
+    if (fig) fig.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    const tile = gridRef.current && gridRef.current.querySelector(`[data-page-id="${activePageId}"]`)
+    if (tile) tile.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
   }, [activePageId, previewMode])
 
   // Step 10 — the wheel-zoom listener. NOTE: React's `onWheel` is attached
@@ -989,19 +1039,93 @@ export default function ComicEditor({ csrfToken }) {
   // callback / state from refs, so they never go stale.
   const deleteSelectionRef = useRef(deleteSelection)
   useEffect(() => { deleteSelectionRef.current = deleteSelection }, [deleteSelection])
-  const activePageIdRef = useRef(activePageId)
-  useEffect(() => { activePageIdRef.current = activePageId }, [activePageId])
+  // Step 12.5d — arrow-key navigation (simple Windows behaviour). From the
+  // ACTIVE (primary) page, the NEIGHBOUR in the arrow's direction — where
+  // "neighbour" is decided by WHERE the selection was last MADE
+  // (lastSurfaceRef):
+  //   • on the PAGES window (a tile/row) → a true GRID cell: Up/Down = one
+  //     row, Left/Right = one column, clamped at the grid's edges (no wrap,
+  //     no crossing a row boundary);
+  //   • in the PREVIEW → the page-ORDER neighbour: Up = the previous page
+  //     (page 8 → Up → page 7 — NOT whatever tile sits physically above the
+  //     active one), Down = the next page; Left/Right are inert.
+  // The column count is measured from the RENDERED grid (auto-fill is
+  // responsive, so it can't be a constant); in the list/fill regimes it is 1,
+  // which collapses everything to page order. `gridRef` points at the pages
+  // `<ul>` (bound in the JSX below).
+  //   • PLAIN arrow  — MOVE: the neighbour becomes active, any multi-selection
+  //     is CLEARED (selection = [active]), and the anchor re-anchors there.
+  //   • SHIFT+arrow  — RANGE: the selection becomes the page-order range from
+  //     the anchor to the neighbour — it GROWS as you move away from the
+  //     anchor and SHRINKS as you move back (back to the anchor = just the
+  //     anchor). The anchor itself never moves on a Shift+arrow.
+  const gridRef = useRef(null)
+  const onArrowNav = useCallback((dir, withShift) => {
+    const pages = selectedPagesRef.current
+    const len = pages.length
+    if (len === 0) return false
+    const i = pages.findIndex(p => p.id === activePageIdRef.current)
+    if (i === -1) return false
+    let C = 1
+    const el = gridRef.current
+    if (el) {
+      const cols = getComputedStyle(el).gridTemplateColumns
+      if (cols && cols !== 'none') C = cols.split(' ').filter(Boolean).length
+    }
+    const grid = lastSurfaceRef.current === 'pages' && C > 1
+    let target = null
+    if (grid) {
+      const col = i % C
+      if (dir === 'up' && i >= C) target = i - C
+      else if (dir === 'down' && i < len - C) target = i + C
+      else if (dir === 'left' && col > 0) target = i - 1
+      else if (dir === 'right' && col < C - 1) target = i + 1
+    } else {
+      if (dir === 'up') target = i - 1
+      else if (dir === 'down') target = i + 1
+      // Left/Right: a single column has no lateral neighbour
+    }
+    if (target === null) return false              // no neighbour that way
+    target = Math.max(0, Math.min(len - 1, target))
+    if (target === i) return false                 // already at the edge
+    const pageId = pages[target].id
+    if (withShift) {
+      // Range from the anchor (a stale anchor falls back to the active page)
+      // to the neighbour, inclusive — in page order.
+      let aIdx = pages.findIndex(p => p.id === anchorRef.current)
+      if (aIdx === -1) aIdx = i
+      const [lo, hi] = aIdx < target ? [aIdx, target] : [target, aIdx]
+      setSelectedIds(pages.slice(lo, hi + 1).map(p => p.id))
+    } else {
+      setSelectedIds([pageId])                     // plain arrow = move + clear
+      anchorRef.current = pageId                   // …and re-anchor there
+    }
+    setActivePageId(pageId)                        // neighbour = new primary
+    scrollActiveRef.current = true                 // bring it into view (preview + tile)
+    return true
+  }, [])
+  const onArrowNavRef = useRef(onArrowNav)
+  useEffect(() => { onArrowNavRef.current = onArrowNav }, [onArrowNav])
   useEffect(() => {
     const onKeyDown = (e) => {
       const t = e.target
       const inField = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)
-      if (inField) return                       // typing must stay editable (both keys)
+      if (inField) return                       // typing must stay editable (all keys)
       if (e.key === 'Delete') {
         deleteSelectionRef.current()
       } else if (e.key === 'Escape') {
-        // Collapse a multi-selection to the primary (the active page).
-        // Nothing to collapse when the selection has ≤ 1 member.
+        // Collapse a multi-selection to the primary (the active page) and
+        // re-anchor there. Nothing to collapse when the selection has ≤ 1
+        // member (the re-anchor is harmless either way).
         setSelectedIds(prev => (prev.length > 1 ? [activePageIdRef.current] : prev))
+        anchorRef.current = activePageIdRef.current
+      } else if (e.key && e.key.indexOf('Arrow') === 0 && !e.altKey && !e.ctrlKey && !e.metaKey) {
+        // Step 12.5d — PLAIN arrow = move (clearing any multi-selection);
+        // SHIFT+arrow = grow/shrink the selection around the anchor. Inert in
+        // text fields (the guard above); preventDefault only when we handled
+        // it, so an unhandled direction doesn't eat a legitimate default.
+        const handled = onArrowNavRef.current(e.key.slice(5).toLowerCase(), e.shiftKey)
+        if (handled) e.preventDefault()
       }
     }
     window.addEventListener('keydown', onKeyDown)
@@ -1167,6 +1291,7 @@ export default function ComicEditor({ csrfToken }) {
               <p className="muted">No pages yet.</p>
             ) : (
               <ul
+                ref={gridRef}
                 className={'page-grid page-grid--' + zoomRegime}
                 style={zoomRegime === 'grid' ? { '--tile': tilePx + 'px' } : undefined}
                 onDragOver={onRowDragOver}
@@ -1192,7 +1317,7 @@ export default function ComicEditor({ csrfToken }) {
                           + (isActive ? ' page-list-item--active' : '')
                           + (isSelected ? ' page-list-item--selected' : '')
                         }
-                        title={`${fileNameOf(p.file_path)} — click to activate · Ctrl+click to multi-select`}
+                        title={`${fileNameOf(p.file_path)} — click to activate · Ctrl+click to multi-select · arrows to move · Shift+arrow to extend · Shift+click to range-select`}
                         onClick={e => onListRowClick(e, p.id)}
                       >
                         <span className="page-list-num">Page {p.page_number}</span>
@@ -1224,7 +1349,7 @@ export default function ComicEditor({ csrfToken }) {
                         + (dragOverId === p.id && draggingId !== null && draggingId !== p.id ? ' page-tile--drop-target' : '')
                       }
                       draggable
-                      title={`${fileNameOf(p.file_path)} — click to activate · Ctrl+click to multi-select · drag to reorder`}
+                      title={`${fileNameOf(p.file_path)} — click to activate · Ctrl+click to multi-select · arrows to move (grid) · Shift+arrow to extend · drag to reorder`}
                       onClick={e => onListRowClick(e, p.id)}
                       onDragStart={e => onRowDragStart(e, p)}
                       onDragEnd={clearDrag}
@@ -1325,8 +1450,8 @@ export default function ComicEditor({ csrfToken }) {
                       + (showBefore ? ' preview-figure--drop-before' : '')
                       + (showAfter ? ' preview-figure--drop-after' : '')
                     }
-                    title="Click to make this the active page · Ctrl+click to multi-select · drag to reorder"
-                    onClick={e => onListRowClick(e, p.id)}
+                    title="Click to make this the active page · Ctrl+click to multi-select · Up/Down = the adjacent page · Shift+Up/Down to extend · drag to reorder"
+                    onClick={e => onListRowClick(e, p.id, 'preview')}
                     draggable
                     onDragStart={e => onRowDragStart(e, p)}
                     onDragEnd={clearDrag}
