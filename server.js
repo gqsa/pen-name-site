@@ -31,6 +31,7 @@ import {
 } from './paypal-subscriptions.js';
 
 import path from 'node:path';
+import { spawnSync } from 'node:child_process'; // B2.2: boot-time SPA build (Render's build step is a bare `npm install`)
 import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1026,6 +1027,36 @@ function isAdmin(req) {
 // deploy before B2.10's build step lands). Either way, the SPA HTML never
 // leaves an admin session.
 const ADMIN_DIST = path.join(__dirname, 'admin-frontend', 'dist');
+
+// B2.2 deploy self-heal (2026-09-27): the Render service's build step is a
+// bare `npm install` (its dashboard config), and its free-tier disk is wiped
+// on every cold start. Lifecycle hooks proved unreliable — Render's npm runs
+// workspace postinstall BEFORE the workspace deps exist (`vite: not found`,
+// 2026-09-27 deploy). So: at boot, if dist/ is missing, build it here while
+// the deps are still in node_modules. A failed or impossible build falls
+// through to the EJS page below exactly as before — the SPA is a
+// convenience, never a hard dependency.
+if (!existsSync(path.join(ADMIN_DIST, 'index.html'))) {
+  const viteBin = [
+    path.join(__dirname, 'node_modules', 'vite', 'bin', 'vite.js'),
+    path.join(__dirname, 'admin-frontend', 'node_modules', 'vite', 'bin', 'vite.js'),
+  ].find((p) => existsSync(p));
+  if (viteBin) {
+    console.log('[B2.2] admin-frontend/dist missing at boot — running vite build now…');
+    const r = spawnSync(process.execPath, [viteBin, 'build'], {
+      cwd: path.join(__dirname, 'admin-frontend'),
+      stdio: 'inherit',
+      timeout: 120000,
+    });
+    if (r.status === 0) {
+      console.log('[B2.2] admin-frontend/dist built at boot');
+    } else {
+      console.warn(`[B2.2] boot-time vite build failed (exit ${r.status ?? 'signal'}) — /admin will serve the EJS page`);
+    }
+  } else {
+    console.warn('[B2.2] admin-frontend/dist missing and vite not found in node_modules — /admin will serve the EJS page. Run `npm install && npm run build:admin`.');
+  }
+}
 
 // The implementation tracker: the A/B/C roadmap with done = checked.
 // (EJS admin page — the no-build fallback; the React version lands in B2.3.)
