@@ -201,7 +201,17 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 .page-tile { cursor: grab; }
 .page-tile:active { cursor: grabbing; }
 .page-tile--dragging { opacity: .45; }
-.page-tile--drop-target { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+/* Step 11.5b — the TILE WINDOW's landing-slot indicator (the Step-9.5
+   concept ported to the 2D grid): the marker sits on the ONE cell the
+   dragged page will LAND on — the exact slot the drop handler splices at,
+   so the drop always lands where the marker was (the grid wraps, so "between
+   two tiles" resolves to a slot index, not a visual gap). A solid 3px ring
+   + an inner red wash: clearly STRONGER than the active (2px) / selected
+   (1px) rings, so it reads as "landing here," never as "this page" (the
+   old .page-tile--drop-target ring was styled like --active and — because
+   the ul's dragover ran last — never actually showed; both are fixed). */
+.page-tile--drop-slot { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent), inset 0 0 28px rgba(172, 46, 52, .5); }
+.page-list-item--drop-slot { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent); background: var(--accent-soft); }
 
 /* Step 7 — the preview is a BOUNDED window with internal scroll (the page
    itself does not grow); Step 11 (done) replaced the fixed 640px height

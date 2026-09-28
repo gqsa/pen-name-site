@@ -82,6 +82,19 @@ import ResizableSection from './ResizableSection.jsx'
 //     range from the anchor to the neighbour (moving back to the anchor
 //     deselects); Shift+click selects the anchor→page range. Ctrl+click
 //     still toggles. All of it is inert while a text field has focus.
+//   • Step 11.5b — the TILE WINDOW's drop-position indicator (the Step-9.5
+//     concept ported to the 2D grid): ONE dragover handler on the grid <ul>
+//     (the old per-tile + per-list pair fought over the same event — the
+//     list-level one ran last and cleared the tile's, so the old
+//     .page-tile--drop-target ring never actually showed) resolves the hover
+//     to the LANDING SLOT (the index the drop handler splices at) and marks
+//     that single cell — the grid wraps, so "between two tiles" is a slot
+//     index, not a visual gap. The marker and the drop share ONE slot model
+//     (resolveGridSlot), so the drop always lands exactly where the marker
+//     was. Covers BOTH drag sources (tile→tile + the preview→tile cross-pane
+//     drop — one dragIdRef, one reorder()). In the list regime (fully zoomed
+//     out) a row drop lands LAST (rows have no per-row drop), so the marker
+//     is the last row there.
 //
 // Still NOT here: B4 marquee / crop selection (a later step).
 // Keep the state shape stable.
@@ -273,14 +286,27 @@ export default function ComicEditor({
 
   // Step 3 — drag-reorder state.
   const [draggingId, setDraggingId] = useState(null)   // the row being dragged (opacity cue)
-  const [dragOverId, setDragOverId] = useState(null)   // the row a drop would land on (indicator)
   const [reordering, setReordering] = useState(false)  // "Reordering…" cue near the Pages heading
   const reorderingRef = useRef(false)                   // authoritative in-flight guard (ref = always current)
   const dragIdRef = useRef(null)                        // the dragged page id (ref = stable across renders)
+  // Step 12.5e — the ids of the BLOCK being dragged: the dragged page alone,
+  // or the whole multi-selection when the dragged page is a member. Every
+  // member gets the fading --dragging cue ("this group is what's moving").
+  const [dragBlockIds, setDragBlockIds] = useState(null)
+  const dragBlockRef = useRef(null)                      // the same ids as a ref (read at event time)
   // Step 9.5 — the preview's insertion slot: the index (into the VISIBLE
   // figure list) where a drop would land, or null when no preview dragover
   // is in progress. Drives the red before/after bar on the target figure.
   const [previewDropIdx, setPreviewDropIdx] = useState(null)
+  // Step 11.5b — the TILE WINDOW's landing slot: the 0-based index (into the
+  // comic's CURRENT page list — the cell the dragged page will OCCUPY after
+  // the drop) where a drop over the grid would land, or null when no grid
+  // dragover is in progress / the drop would be a no-op. Drives the red slot
+  // marker on that one cell. The marker and every drop handler share ONE
+  // plan (planBlockDrop — the dragged page, or its whole selection block per
+  // Step 12.5e), so the drop lands where the marker was — the grid's answer
+  // to the preview's before/after bar.
+  const [gridDropSlot, setGridDropSlot] = useState(null)
 
   // Step 4 — caption auto-save state.
   const captionTimers = useRef({})                       // page id → pending debounce timeout (per page, so one page's timer can't clobber another's)
@@ -297,6 +323,8 @@ export default function ComicEditor({
   // (last = newest = the primary). A plain click resets it to [that page];
   // a Ctrl/Cmd+click toggles the page in it. Empty = no multi-selection.
   const [selectedIds, setSelectedIds] = useState([])
+  const selectedIdsRef = useRef(selectedIds)
+  useEffect(() => { selectedIdsRef.current = selectedIds }, [selectedIds])
   // Step 12.5d — arrow-key navigation context (refs ONLY — nothing in the UI
   // reads them, so no state / re-render): `lastSurfaceRef` = WHERE the last
   // selection action was made ('pages' = a tile/row click → the neighbour is
@@ -381,6 +409,8 @@ export default function ComicEditor({
       ? selectedPages.filter(p => selectedIds.includes(p.id))
       : selectedPages.filter(p => p.id === activePageId))
     : selectedPages
+  const visiblePagesRef = useRef(visiblePages)
+  useEffect(() => { visiblePagesRef.current = visiblePages }, [visiblePages])
 
   // Step 7 + Step 12.5b — keep the selection AND the active page VALID against
   // the current comic's pages (one effect, the single source of truth):
@@ -735,7 +765,9 @@ export default function ComicEditor({
   const clearDrag = useCallback(() => {
     dragIdRef.current = null
     setDraggingId(null)
-    setDragOverId(null)
+    dragBlockRef.current = null
+    setDragBlockIds(null)
+    setGridDropSlot(null)
     setPreviewDropIdx(null)
   }, [])
 
@@ -749,6 +781,12 @@ export default function ComicEditor({
     }
     dragIdRef.current = page.id
     setDraggingId(page.id)
+    // Step 12.5e — a drag moves a BLOCK: the dragged page alone, or (when it
+    // is a member of the multi-selection) the WHOLE selection. The member
+    // ids drive the fading cue on every block tile.
+    const block = resolveDragBlock(page.id)
+    dragBlockRef.current = block.map(p => p.id)
+    setDragBlockIds(dragBlockRef.current)
     if (e.dataTransfer) {
       e.dataTransfer.effectAllowed = 'move'
       // Firefox will not start a drag at all unless something is set on the
@@ -757,21 +795,116 @@ export default function ComicEditor({
     }
   }, [])
 
-  // Shared by rows AND the list: allow the drop, and set the drop-target
-  // indicator to the hovered row (data-page-id) — or clear it when hovering
-  // the list body (gap = the page will land last).
-  const onRowDragOver = useCallback((e) => {
+  // --- Step 12.5e — the block-drop model (single page = a block of one) ----
+  // A drag moves a BLOCK: the dragged page alone, or — if the dragged page
+  // is a member of the multi-selection — the WHOLE selection, as one block
+  // (internal order = the pages' current order, so a group keeps its
+  // arrangement). The dragged page is the HANDLE: the marker (grid: the red
+  // slot cell, preview: the before/after bar) predicts the drop by tracking
+  // the cell the HANDLE will occupy. ONE plan function computes the drop's
+  // result + the handle's landing cell — the marker and EVERY drop handler
+  // (grid tile, grid gap, preview) read it, so they can't disagree:
+  //   • drop on a page P (not in the block) → the block goes before P,
+  //   • drop on the gap / the list body / after the last preview figure →
+  //     the block goes last,
+  //   • drop on a block member, or where the block already sits → a no-op
+  //     (no marker, no reorder — "no marker" ⇔ "nothing would happen").
+  // The k=1 case reproduces the user-verified Step 11.5b model exactly
+  // (h < d → h, h > d → h − 1, the no-op suppressions, gap → last) — guarded
+  // by scratch/test-step-12.5e-group.mjs (476-case equivalence + group
+  // invariants over every subset/handle/target). The 2026-09-28 inversion
+  // bug (h > d ? h : h − 1 — marker one cell off everywhere, slot −1 = no
+  // marker when hovering page 1 with a later page dragged) stays documented
+  // in b2-5-appendix.md §[step-11.5b].
+  const resolveDragBlock = useCallback((draggedId) => {
+    const sel = selectedIdsRef.current
+    const pages = selectedPagesRef.current
+    const ids = (sel.length > 1 && sel.includes(draggedId)) ? sel : [draggedId]
+    return pages.filter(p => ids.includes(p.id))   // in PAGE order (stable)
+  }, [])
+
+  // The drop's plan: the new full page order + the index the HANDLE will
+  // occupy in it. targetId = the page the block goes BEFORE (null = last).
+  // null = a no-op / invalid drop (a block member, already there, unknown
+  // target) — the same null the marker uses, so the indicator is suppressed
+  // exactly when the drop would do nothing.
+  const planBlockDrop = useCallback((draggedId, targetId) => {
+    const pages = selectedPagesRef.current
+    if (!pages.length) return null
+    const blockIds = dragBlockRef.current || [draggedId]
+    const block = pages.filter(p => blockIds.includes(p.id))
+    if (!block.length) return null
+    if (targetId != null && block.some(b => b.id === targetId)) return null
+    const without = pages.filter(p => !block.some(b => b.id === p.id))
+    const idx = targetId == null
+      ? without.length
+      : without.findIndex(p => p.id === targetId)
+    if (idx === -1) return null
+    const next = [...without.slice(0, idx), ...block, ...without.slice(idx)]
+    if (pages.every((p, i) => p.id === next[i].id)) return null   // no-op
+    const pos = block.findIndex(b => b.id === draggedId)
+    return { next, handleLanding: idx + pos }
+  }, [])
+
+  // A successful drop commits the drag's intent: the dragged page becomes
+  // the ACTIVE page (the caption editor follows the drag), and a lone drag
+  // (not a member of the multi-selection) normalizes the selection to
+  // itself — exactly what a plain click does. A group drag keeps its
+  // selection (the handle is a member, so the validity effect holds).
+  const commitDragActive = useCallback((draggedId) => {
+    const sel = selectedIdsRef.current
+    if (!(sel.length > 1 && sel.includes(draggedId))) setSelectedIds([draggedId])
+    setActivePageId(draggedId)
+  }, [])
+
+  // Step 11.5b — the TILE WINDOW's landing-slot marker (the Step-9.5 concept,
+  // ported to the 2D grid). ONE handler on the grid <ul> (the old per-tile +
+  // per-list pair fought over the same dragover — React ran both, list-level
+  // last, so the list's null always clobbered the tile's id and the ring
+  // never showed): the hovered tile is resolved from the event TARGET (a
+  // child of the tile — img / label / bin — or the ul itself = the gap), and
+  // the plan gives the cell the handle will occupy — the drop lands exactly
+  // there (the marker and the drops share planBlockDrop).
+  const resolveGridSlot = useCallback((hoverPageId) => {
+    const draggedId = dragIdRef.current
+    if (draggedId == null) return null
+    const plan = planBlockDrop(draggedId, hoverPageId)
+    return plan ? plan.handleLanding : null
+  }, [planBlockDrop])
+  const onGridDragOver = useCallback((e) => {
     if (dragIdRef.current === null) return   // not our drag (e.g. a file drag)
     e.preventDefault()                        // REQUIRED for the drop to be allowed
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
-    const el = e.currentTarget
-    setDragOverId(el && el.tagName === 'LI' && el.dataset.pageId ? Number(el.dataset.pageId) : null)
-  }, [])
-
-  const onRowDragLeave = useCallback((e) => {
-    // dragleave fires when the pointer moves onto a child — ignore that.
-    if (e.relatedTarget && e.currentTarget.contains(e.relatedTarget)) return
-    setDragOverId(null)
+    // The LIST regime (fully zoomed out) has NO per-row drop — a row drop
+    // lands LAST (the rows have no onDrop; the ul's does) — so the slot is
+    // always the end there, whichever row is under the pointer. In the
+    // grid/fill regimes resolve the hovered tile from the event target
+    // (closest() — the target is often a child of the tile, e.g. the img).
+    const isList = zoom <= ZOOM_LIST_MAX
+    const li = (!isList && e.target && e.target.closest)
+      ? e.target.closest('li[data-page-id]')
+      : null
+    setGridDropSlot(resolveGridSlot(li ? Number(li.dataset.pageId) : null))
+  }, [zoom, resolveGridSlot])
+  const onGridDragLeave = useCallback((e) => {
+    // Did the pointer actually LEAVE the grid <ul>? Two signals, in order:
+    //   1. relatedTarget (when the browser sets it on the dragleave): if it
+    //      is NOT inside the ul, the pointer is gone → clear. (Same guard the
+    //      user-verified preview indicator uses.)
+    //   2. relatedTarget is null (many browsers don't set it on drag events)
+    //      AND the element being left IS the ul itself → the pointer is gone
+    //      → clear.
+    // If neither applies (leaving a child, destination unknown), do NOT clear:
+    // the next dragover re-resolves the slot, and drop / dragend (clearDrag)
+    // clears definitively — so a stale marker can only persist until then,
+    // the same lifetime as the preview's insertion bar. This is robust to
+    // either relatedTarget behaviour instead of betting on one.
+    const rt = e.relatedTarget
+    if (rt) {
+      if (!e.currentTarget.contains(rt)) setGridDropSlot(null)
+      return
+    }
+    if (e.target === e.currentTarget) setGridDropSlot(null)
   }, [])
 
   // The ONE place a new order is computed + persisted. `next` must be the
@@ -816,28 +949,25 @@ export default function ComicEditor({
     e.preventDefault()
     e.stopPropagation()                          // keep the list-level handler out
     const draggedId = dragIdRef.current
-    clearDrag()
     if (draggedId === null || reorderingRef.current) return
-    if (draggedId === page.id) return            // dropped on itself = no change
-    const dragged = selectedPages.find(p => p.id === draggedId)
-    if (!dragged) return
-    const without = selectedPages.filter(p => p.id !== draggedId)
-    const idx = without.findIndex(p => p.id === page.id)
-    reorder([...without.slice(0, idx), dragged, ...without.slice(idx)])
-  }, [selectedPages, clearDrag, reorder])
+    const plan = planBlockDrop(draggedId, page.id)
+    clearDrag()
+    if (!plan) return                            // self / block member / already there
+    reorder(plan.next)
+    commitDragActive(draggedId)                  // the dragged page becomes active
+  }, [clearDrag, reorder, planBlockDrop, commitDragActive])
 
-  // Drop on the list body / a row gap → the page lands LAST.
+  // Drop on the list body / a row gap → the block lands LAST.
   const onListDrop = useCallback((e) => {
     e.preventDefault()
     const draggedId = dragIdRef.current
-    clearDrag()
     if (draggedId === null || reorderingRef.current) return
-    const dragged = selectedPages.find(p => p.id === draggedId)
-    if (!dragged) return
-    if (selectedPages.length && selectedPages[selectedPages.length - 1].id === draggedId) return
-    const without = selectedPages.filter(p => p.id !== draggedId)
-    reorder([...without, dragged])
-  }, [selectedPages, clearDrag, reorder])
+    const plan = planBlockDrop(draggedId, null)
+    clearDrag()
+    if (!plan) return                            // the block already sits last
+    reorder(plan.next)
+    commitDragActive(draggedId)
+  }, [clearDrag, reorder, planBlockDrop, commitDragActive])
 
   // --- Step 9.5: drag-reorder on the PREVIEW ----------------------------------
   //
@@ -889,19 +1019,20 @@ export default function ComicEditor({
     e.preventDefault()
     const draggedId = dragIdRef.current
     const slot = previewDropIdx
-    clearDrag()
     if (draggedId === null || reorderingRef.current || slot === null) return
-    const dragged = selectedPages.find(p => p.id === draggedId)
-    if (!dragged || visiblePages.length === 0) return
-    // Map the VISIBLE-list slot onto the FULL list ("all" mode is 1:1;
-    // "active page only" shows a subset).
-    const fullIdx = slot >= visiblePages.length
-      ? selectedPages.findIndex(p => p.id === visiblePages[visiblePages.length - 1].id) + 1
-      : selectedPages.findIndex(p => p.id === visiblePages[slot].id)
-    const without = selectedPages.filter(p => p.id !== draggedId)
-    const at = Math.max(0, Math.min(without.length, fullIdx))
-    reorder([...without.slice(0, at), dragged, ...without.slice(at)])
-  }, [previewDropIdx, selectedPages, visiblePages, clearDrag, reorder])
+    const visible = visiblePagesRef.current
+    if (visible.length === 0) return
+    // Map the VISIBLE-list slot onto the block-drop target: the bar on
+    // figure i = insert before it; after the last figure = last. (The plan
+    // then splices the block at exactly that point in the FULL list — "all"
+    // mode is 1:1, "active page only" a subset.)
+    const targetId = slot < visible.length ? visible[slot].id : null
+    const plan = planBlockDrop(draggedId, targetId)
+    clearDrag()
+    if (!plan) return
+    reorder(plan.next)
+    commitDragActive(draggedId)
+  }, [previewDropIdx, clearDrag, reorder, planBlockDrop, commitDragActive])
 
   // --- Step 4: caption auto-save ------------------------------------------------
   //
@@ -1368,10 +1499,11 @@ export default function ComicEditor({
                 ref={gridRef}
                 className={'page-grid page-grid--' + zoomRegime}
                 style={zoomRegime === 'grid' ? { '--tile': tilePx + 'px' } : undefined}
-                onDragOver={onRowDragOver}
+                onDragOver={onGridDragOver}
+                onDragLeave={onGridDragLeave}
                 onDrop={onListDrop}
               >
-                {selectedPages.map(p => {
+                {selectedPages.map((p, i) => {
                   const isActive = activePageId === p.id
                   // Step 12.5b — the multi-selection membership (the ACTIVE
                   // page takes the full --active treatment; the other selected
@@ -1390,6 +1522,10 @@ export default function ComicEditor({
                           'page-list-item'
                           + (isActive ? ' page-list-item--active' : '')
                           + (isSelected ? ' page-list-item--selected' : '')
+                          // Step 11.5b — the list regime's landing slot (a row
+                          // drop lands LAST, so this is the last row — the
+                          // cell the dragged page will occupy).
+                          + (gridDropSlot === i ? ' page-list-item--drop-slot' : '')
                         }
                         title={`${fileNameOf(p.file_path)} — click to activate · Ctrl+click to multi-select · arrows to move · Shift+arrow to extend · Shift+click to range-select`}
                         onClick={e => onListRowClick(e, p.id)}
@@ -1419,16 +1555,21 @@ export default function ComicEditor({
                         'page-tile'
                         + (isActive ? ' page-tile--active' : '')
                         + (isSelected ? ' page-tile--selected' : '')
-                        + (draggingId === p.id ? ' page-tile--dragging' : '')
-                        + (dragOverId === p.id && draggingId !== null && draggingId !== p.id ? ' page-tile--drop-target' : '')
+                        // Step 12.5e — every member of the dragged BLOCK gets the
+                        // fading cue (a lone drag = just that tile, as before).
+                        + (dragBlockIds && dragBlockIds.includes(p.id) ? ' page-tile--dragging' : '')
+                        // Step 11.5b — the LANDING SLOT: the cell the dragged
+                        // page will occupy (the marker and the drop share the
+                        // one slot model, so a drop lands exactly here). The
+                        // grid/fill regimes only — in the list regime the
+                        // rows above take the slot instead.
+                        + (gridDropSlot === i ? ' page-tile--drop-slot' : '')
                       }
                       draggable
-                      title={`${fileNameOf(p.file_path)} — click to activate · Ctrl+click to multi-select · arrows to move (grid) · Shift+arrow to extend · drag to reorder`}
+                      title={`${fileNameOf(p.file_path)} — click to activate · Ctrl+click to multi-select · arrows to move (grid) · Shift+arrow to extend · drag to reorder · drag a selected page to move the whole selection`}
                       onClick={e => onListRowClick(e, p.id)}
                       onDragStart={e => onRowDragStart(e, p)}
                       onDragEnd={clearDrag}
-                      onDragOver={onRowDragOver}
-                      onDragLeave={onRowDragLeave}
                       onDrop={e => onRowDrop(e, p)}
                     >
                       <img src={p.file_path} alt={`Page ${p.page_number}`} />
@@ -1505,14 +1646,16 @@ export default function ComicEditor({
                 // Step 12.5b — multi-select outline on the selected (non-active)
                 // figures; the active one keeps the full --active treatment.
                 const isSelected = !isActive && selectedIds.includes(p.id)
-                // Step 9.5 — the insertion-slot bar (above = before this
-                // figure, below = after). Never shown on a no-op slot (before
-                // or after the dragged figure itself).
-                const dragVisIdx = draggingId !== null
-                  ? visiblePages.findIndex(q => q.id === draggingId)
-                  : -1
-                const showBefore = previewDropIdx === i && dragVisIdx !== i
-                const showAfter = previewDropIdx === i + 1 && dragVisIdx !== i - 1
+                // Step 9.5 bar + Step 12.5e — never shown at a no-op slot:
+                // the SAME plan the drop uses is null there (the group's own
+                // span, a page already in place, or the tail when the block
+                // already sits last — the old per-figure check missed that
+                // last case and showed a phantom bar).
+                const planAt = (slot) => draggingId !== null && slot >= 0 && slot <= visiblePages.length
+                  ? planBlockDrop(draggingId, slot < visiblePages.length ? visiblePages[slot].id : null)
+                  : null
+                const showBefore = previewDropIdx === i && !!planAt(i)
+                const showAfter = previewDropIdx === i + 1 && !!planAt(i + 1)
                 return (
                   <figure
                     key={p.id}
@@ -1524,7 +1667,7 @@ export default function ComicEditor({
                       + (showBefore ? ' preview-figure--drop-before' : '')
                       + (showAfter ? ' preview-figure--drop-after' : '')
                     }
-                    title="Click to make this the active page · Ctrl+click to multi-select · Up/Down = the adjacent page · Shift+Up/Down to extend · drag to reorder"
+                    title="Click to make this the active page · Ctrl+click to multi-select · Up/Down = the adjacent page · Shift+Up/Down to extend · drag to reorder · drag a selected page to move the whole selection"
                     onClick={e => onListRowClick(e, p.id, 'preview')}
                     draggable
                     onDragStart={e => onRowDragStart(e, p)}
