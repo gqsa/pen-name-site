@@ -245,7 +245,11 @@ function PageBin({ title, disabled, onClick }) {
   )
 }
 
-export default function ComicEditor({ csrfToken }) {
+export default function ComicEditor({
+  csrfToken,
+  topDelta = 0,
+  onTopDeltaChange = null,
+}) {
   // comics: array (null until the first fetch lands) — the full comic list.
   // pages : array — ALL comics' pages from the same fetch (keyed `pages`).
   // selectedId: the id of the comic being edited (a number, matching the DB id).
@@ -1232,11 +1236,22 @@ export default function ComicEditor({ csrfToken }) {
     : (activePageId != null ? 1 : 0)
 
   // Step 11 — the section is the generic RESIZABLE section (plain pattern,
-  // reusable by the story / media sections + B2.8): fixed height (state) + a bottom-edge grip
-  // that drag-resizes it; the two windows inside flex-fill + scroll
-  // internally. The loading / error branches above stay plain <section>s.
+  // reusable by the story / media sections + B2.8): fixed height (state) + grips
+  // on both edges that drag-resize it; the two windows inside flex-fill +
+  // scroll internally. The loading / error branches above stay plain <section>s.
+  // Step 11.5a (fourth revision — the current one) — two deltas: the BOTTOM
+  // grip changes the height (bottom edge follows the pointer, top edge fixed,
+  // the page grows at the bottom); the TOP grip moves the top edge with the
+  // pointer (bottom edge fixed) via `topDelta` / `onTopDeltaChange` — App
+  // shifts the content above (its `.wrap`) to make room. This component only
+  // passes the pair through; the deltas live in ResizableSection.
   return (
-    <ResizableSection className="comic-editor" storageKey="comicEditor">
+    <ResizableSection
+      className="comic-editor"
+      storageKey="comicEditor"
+      topDelta={topDelta}
+      onTopDeltaChange={onTopDeltaChange}
+    >
       <h2>Comic editor</h2>
       <p className="muted">
         Split view — pick or create a comic on the left, add its pages with the
