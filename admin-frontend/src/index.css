@@ -55,6 +55,9 @@ button:disabled { opacity: .55; cursor: default; }
 .resizable-grip::before { content: ""; width: 48px; height: 4px; border-radius: 2px; background: var(--line); }
 .resizable-grip:hover { background: var(--accent-soft); }
 .resizable-grip:hover::before { background: var(--accent); }
+/* Step 11.5a — both-edge grips: the TOP grip sits above the body, so its
+   gap margin flips to the bottom side (the bottom grip keeps margin-top). */
+.resizable-grip--top { margin-top: 0; margin-bottom: 4px; }
 /* While the grip is dragged: force the ns-resize cursor everywhere and
    suppress text selection (dragging over the body would otherwise grab
    text / start a native drag). */

@@ -143,6 +143,26 @@ const ZOOM_STEP = 6        // one wheel notch
 const GRID_TILE_MIN = 72   // px, the grid regime's low end
 const GRID_TILE_MAX = 260  // px, the grid regime's high end
 
+// Step 11.5a — remember the tile zoom level. ONE global value (like a
+// folder-view zoom setting — not per-comic): it survives a hard reload AND
+// comic switches. localStorage is browser-side, so it also survives
+// Render's free-tier disk wipes. try/catch'd: a blocked storage degrades to
+// the default mid grid (session-only). Corrupt/absent → default 50.
+const ZOOM_STORAGE_KEY = 'gqsa.comicTileZoom'
+const ZOOM_DEFAULT = 50
+function readStoredZoom() {
+  try {
+    const raw = window.localStorage.getItem(ZOOM_STORAGE_KEY)
+    if (raw == null) return ZOOM_DEFAULT
+    const n = Number.parseInt(raw, 10)
+    if (!Number.isFinite(n) || n < 0 || n > 100) return ZOOM_DEFAULT
+    return n
+  } catch { return ZOOM_DEFAULT }
+}
+function storeZoom(z) {
+  try { window.localStorage.setItem(ZOOM_STORAGE_KEY, String(z)) } catch { /* session-only */ }
+}
+
 // THE upload call (the house pattern — copied shape, `kind` BEFORE `file`,
 // no Content-Type: the browser sets the multipart boundary).
 async function uploadImage(file, csrfToken) {
@@ -263,7 +283,9 @@ export default function ComicEditor({ csrfToken }) {
   // mid (the grid), so a fresh view looks like Step 9. The wheel listener
   // is bound to this (always-present) section wrapper, not the grid itself
   // (the grid is absent while "No pages yet.").
-  const [zoom, setZoom] = useState(50)
+  // Step 11.5a — initialised from localStorage (the remembered level,
+  // ZOOM_DEFAULT when absent/invalid) instead of the fixed default.
+  const [zoom, setZoom] = useState(() => readStoredZoom())
   const pagesSectionRef = useRef(null)
 
   // Step 12 — deleting the ACTIVE page (the server renumbers the rest to a
@@ -433,10 +455,10 @@ export default function ComicEditor({ csrfToken }) {
     return () => el.removeEventListener('wheel', onWheel)
   }, [comics])
 
-  // Step 10 — on a comic switch, reset the zoom to the default (mid grid).
-  // Chosen over "keep" (noted per the step): a new comic is a new view, so a
-  // fresh zoom is less surprising. (Also runs on first mount — a no-op.)
-  useEffect(() => { setZoom(50) }, [selectedId])
+  // Step 11.5a — REMEMBER the zoom level (replaces Step 10's "reset to 50 on
+  // comic switch"): the level now survives a hard reload AND comic switches.
+  // One global value (like a folder-view zoom setting), not per-comic.
+  useEffect(() => { storeZoom(zoom) }, [zoom])
 
   const createComic = useCallback(async () => {
     const title = newTitle.trim()
@@ -1177,7 +1199,7 @@ export default function ComicEditor({ csrfToken }) {
   // that drag-resizes it; the two windows inside flex-fill + scroll
   // internally. The loading / error branches above stay plain <section>s.
   return (
-    <ResizableSection className="comic-editor">
+    <ResizableSection className="comic-editor" storageKey="comicEditor">
       <h2>Comic editor</h2>
       <p className="muted">
         Split view — pick or create a comic on the left, add its pages with the

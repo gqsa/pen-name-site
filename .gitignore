@@ -21,6 +21,7 @@ npm-cache/
 # handoff trail (b2-4.md, b2-5.md, …), and any NEW ones created in future).
 # `b[0-9]*.md` future-proofs the breakdown files so they can't be re-added by accident.
 progress.md
+progress-appendix.md
 paypal-skill.md
 b[0-9]*.md
 
