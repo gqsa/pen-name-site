@@ -163,6 +163,39 @@ function storeZoom(z) {
   try { window.localStorage.setItem(ZOOM_STORAGE_KEY, String(z)) } catch { /* session-only */ }
 }
 
+// 2026-09-28 follow-up — WINDOW-scoped scroll helpers. The old centre effect
+// used `el.scrollIntoView()`, which scrolls EVERY scrollable ancestor up to
+// the viewport — including the DOCUMENT itself: with the active page on
+// 1–3, toggling "active page only" OFF scrolled the whole page up a little.
+// These scroll only the target's OWN window (the nearest overflow-y:
+// auto/scroll ancestor) and never touch the document's scroll position.
+function scrollerOf(el) {
+  let n = el.parentElement
+  while (n && n !== document.body) {
+    const oy = window.getComputedStyle(n).overflowY
+    if ((oy === 'auto' || oy === 'scroll') && n.scrollHeight > n.clientHeight) return n
+    n = n.parentElement
+  }
+  return null
+}
+function scrollWindowTo(el, scroller, mode) {
+  if (!scroller) return
+  const r = el.getBoundingClientRect()
+  const c = scroller.getBoundingClientRect()
+  if (mode === 'center') {
+    // centre el in the scroller's visible area (clamped at the top — the
+    // early pages can't be centred above the content, so they just sit at 0)
+    const target = scroller.scrollTop + (r.top - c.top) - (scroller.clientHeight - el.offsetHeight) / 2
+    scroller.scrollTo({ top: Math.max(0, target), behavior: 'smooth' })
+  } else {
+    // 'nearest' — reveal at the edge, a no-op when already visible (the old
+    // scrollIntoView({ block: 'nearest' }) semantics, minus the document)
+    const pad = 8
+    if (r.top < c.top + pad) scroller.scrollBy({ top: r.top - c.top - pad, behavior: 'smooth' })
+    else if (r.bottom > c.bottom - pad) scroller.scrollBy({ top: r.bottom - c.bottom + pad, behavior: 'smooth' })
+  }
+}
+
 // THE upload call (the house pattern — copied shape, `kind` BEFORE `file`,
 // no Content-Type: the browser sets the multipart boundary).
 async function uploadImage(file, csrfToken) {
@@ -421,15 +454,19 @@ export default function ComicEditor({ csrfToken }) {
   // Runs AFTER React has rendered the (possibly newly visible) active figure —
   // in 'active' mode it only exists post-render — and brings the active page
   // into view: centred in the PREVIEW window, and (Step 12.5d) the active
-  // TILE / list row in the pages window scrolled to the edge — 'nearest' is a
-  // no-op when it is already visible (a plain click on it).
+  // TILE / list row in the pages window scrolled to the edge.
+  // 2026-09-28 follow-up — WINDOW-scoped: the old `scrollIntoView` scrolled
+  // every ancestor INCLUDING the document (toggling "active page only" off
+  // with the active page on 1–3 scrolled the whole page up). Now only the
+  // page's OWN window scrolls — the preview window for the figure, the pages
+  // window for the tile — the document's scroll position is never touched.
   useEffect(() => {
     if (!scrollActiveRef.current) return
     scrollActiveRef.current = false
     const fig = previewRef.current && previewRef.current.querySelector(`[data-page-id="${activePageId}"]`)
-    if (fig) fig.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    if (fig) scrollWindowTo(fig, previewRef.current, 'center')
     const tile = gridRef.current && gridRef.current.querySelector(`[data-page-id="${activePageId}"]`)
-    if (tile) tile.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    if (tile) scrollWindowTo(tile, scrollerOf(tile), 'nearest')
   }, [activePageId, previewMode])
 
   // Step 10 — the wheel-zoom listener. NOTE: React's `onWheel` is attached
