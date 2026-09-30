@@ -197,21 +197,34 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 .dropzone--busy { cursor: wait; opacity: .75; }
 
 /* Step 3 (tile form since Step 9) — drag-reorder affordances on the tiles
-   (native HTML5 DnD). */
+   (native HTML5 DnD). Step 11.5c: the LIST rows are draggable too — the same
+   grab affordance + the same fading cue on the dragged block's members. */
 .page-tile { cursor: grab; }
 .page-tile:active { cursor: grabbing; }
 .page-tile--dragging { opacity: .45; }
-/* Step 11.5b — the TILE WINDOW's landing-slot indicator (the Step-9.5
-   concept ported to the 2D grid): the marker sits on the ONE cell the
-   dragged page will LAND on — the exact slot the drop handler splices at,
-   so the drop always lands where the marker was (the grid wraps, so "between
-   two tiles" resolves to a slot index, not a visual gap). A solid 3px ring
-   + an inner red wash: clearly STRONGER than the active (2px) / selected
-   (1px) rings, so it reads as "landing here," never as "this page" (the
-   old .page-tile--drop-target ring was styled like --active and — because
-   the ul's dragover ran last — never actually showed; both are fixed). */
-.page-tile--drop-slot { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent), inset 0 0 28px rgba(172, 46, 52, .5); }
-.page-list-item--drop-slot { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent); background: var(--accent-soft); }
+.page-list-item { cursor: grab; }
+.page-list-item:active { cursor: grabbing; }
+.page-list-item--dragging { opacity: .45; }
+/* Step 11.5c — the WHITE drop edges: the edges FACING the drop gap (white,
+   not red — red is reserved for selection/active; the old --drop-slot ring
+   clashed with them and couldn't show on an already-selected tile).
+   ::before pseudo-elements, NOT box-shadow on the element (a box-shadow
+   would override the existing --active/--selected rings — the white edges
+   must COEXIST with them). A middle gap lights TWO tiles'/rows' facing
+   edges (different rows in the wrapped grid — correct: it marks the
+   PAGE-ORDER gap); boundary gaps light ONE edge. */
+.page-tile--drop-edge-left::before,
+.page-tile--drop-edge-right::before {
+  content: ""; position: absolute; top: 0; bottom: 0; width: 3px; background: #fff; z-index: 3;
+}
+.page-tile--drop-edge-left::before { left: 0; }
+.page-tile--drop-edge-right::before { right: 0; }
+.page-list-item--drop-edge-top::before,
+.page-list-item--drop-edge-bottom::before {
+  content: ""; position: absolute; left: 0; right: 0; height: 2px; background: #fff; z-index: 3;
+}
+.page-list-item--drop-edge-top::before { top: 0; }
+.page-list-item--drop-edge-bottom::before { bottom: 0; }
 
 /* Step 7 — the preview is a BOUNDED window with internal scroll (the page
    itself does not grow); Step 11 (done) replaced the fixed 640px height
@@ -233,8 +246,11 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 .preview-figure { cursor: pointer; }
 .preview-figure--active .preview-thumb { box-shadow: 0 0 0 2px var(--accent); }
 .preview-figure--selected .preview-thumb { box-shadow: 0 0 0 1px var(--accent); }
-/* Step 9.5 — the preview's insertion-slot indicator (a figure drag, or a
-   tile drag dropped into the preview): a solid red bar on the edge of the
-   figure the drop would land BEFORE (bar above it) / AFTER (bar below it). */
-.preview-figure--drop-before { box-shadow: 0 -5px 0 0 var(--accent); }
-.preview-figure--drop-after { box-shadow: 0 5px 0 0 var(--accent); }
+/* Step 9.5 (the bar) + 11.5c (the colour) — the preview's insertion-slot
+   indicator: a solid bar on the edge of the figure the drop would land
+   BEFORE (bar above it) / AFTER (bar below it). 11.5c recolors it to #fff
+   (white = the drop, red = selection/active) — the bar sits on the FIGURE's
+   own box-shadow while the --active/--selected rings are on the .preview-thumb
+   child, so the two coexist. */
+.preview-figure--drop-before { box-shadow: 0 -5px 0 0 #fff; }
+.preview-figure--drop-after { box-shadow: 0 5px 0 0 #fff; }

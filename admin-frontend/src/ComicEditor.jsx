@@ -95,6 +95,21 @@ import ResizableSection from './ResizableSection.jsx'
 //     drop — one dragIdRef, one reorder()). In the list regime (fully zoomed
 //     out) a row drop lands LAST (rows have no per-row drop), so the marker
 //     is the last row there.
+//   • Step 11.5c — the drop indicator is now the WHITE edge(s) bracketing the
+//     drop GAP (not a red ring on a cell): red stays reserved for the
+//     selection/active rings, so white = "the drop lands here." Hover→gap is
+//     POSITION-AWARE in both regimes — grid: a tile's LEFT half = the gap
+//     before it, RIGHT half = the gap after it (the last tile's right half =
+//     the end gap; the GUTTER stays the end gap, 11.5b); list: a row's TOP
+//     half = before it, BOTTOM half = after it, and the list BODY (the ul) =
+//     a row-top scan (above the first row = the start gap, between rows =
+//     that gap, below the last = the end gap). ONE resolver (gapFromEvent)
+//     feeds the marker AND every grid drop (the 11.5b invariant), and
+//     planBlockDrop is UNCHANGED (the 12.5e block model is as-is). The preview
+//     bar just recolors to #fff (no logic change). RECORD: Step 14 (file
+//     insertion) MUST use this same resolver — its "over a tile → before that
+//     page" means the LEFT half; a right-half hover = the gap AFTER the page
+//     (the batch-order rule is unchanged).
 //
 // Still NOT here: B4 marquee / crop selection (a later step).
 // Keep the state shape stable.
@@ -298,14 +313,16 @@ export default function ComicEditor({
   // figure list) where a drop would land, or null when no preview dragover
   // is in progress. Drives the red before/after bar on the target figure.
   const [previewDropIdx, setPreviewDropIdx] = useState(null)
-  // Step 11.5b — the TILE WINDOW's landing slot: the 0-based index (into the
-  // comic's CURRENT page list — the cell the dragged page will OCCUPY after
-  // the drop) where a drop over the grid would land, or null when no grid
-  // dragover is in progress / the drop would be a no-op. Drives the red slot
-  // marker on that one cell. The marker and every drop handler share ONE
-  // plan (planBlockDrop — the dragged page, or its whole selection block per
-  // Step 12.5e), so the drop lands where the marker was — the grid's answer
-  // to the preview's before/after bar.
+  // Step 11.5b → 11.5c — the TILE WINDOW's drop GAP: the insertion index
+  // (0..n, into the comic's CURRENT page list; n = the end) where a drop over
+  // the grid would land, or null when no grid dragover is in progress / the
+  // drop would be a no-op. Drives the WHITE edges facing that gap (a middle
+  // gap lights two tiles'/rows' facing edges — which may sit on DIFFERENT
+  // rows in a wrapped grid — and a boundary gap lights ONE). The marker and
+  // every drop handler share ONE resolver (gapFromEvent) + ONE plan
+  // (planBlockDrop — the dragged page, or its whole selection block per
+  // Step 12.5e), so the drop lands exactly where the marker was — the grid's
+  // answer to the preview's before/after bar.
   const [gridDropSlot, setGridDropSlot] = useState(null)
 
   // Step 4 — caption auto-save state.
@@ -857,35 +874,70 @@ export default function ComicEditor({
     setActivePageId(draggedId)
   }, [])
 
-  // Step 11.5b — the TILE WINDOW's landing-slot marker (the Step-9.5 concept,
-  // ported to the 2D grid). ONE handler on the grid <ul> (the old per-tile +
-  // per-list pair fought over the same dragover — React ran both, list-level
-  // last, so the list's null always clobbered the tile's id and the ring
-  // never showed): the hovered tile is resolved from the event TARGET (a
-  // child of the tile — img / label / bin — or the ul itself = the gap), and
-  // the plan gives the cell the handle will occupy — the drop lands exactly
-  // there (the marker and the drops share planBlockDrop).
-  const resolveGridSlot = useCallback((hoverPageId) => {
+  // Step 11.5c — ONE hover→gap resolver shared by the marker AND every grid
+  // drop (the 11.5b invariant, carried over: marker ⇔ drop can't disagree).
+  // Returns the target page id the block goes BEFORE (null = the end gap).
+  //   • over a page (grid tile / list row): the NEAR half decides — a tile's
+  //     LEFT half / a row's TOP half = before it; a tile's RIGHT half / a row's
+  //     BOTTOM half = after it (the next page in PAGE order, or the end).
+  //   • over the list BODY (the ul, not a row): a row-top scan — the first
+  //     row whose TOP is below the pointer gets the gap before it; none → end.
+  //   • over the grid GUTTER: UNCHANGED from 11.5b — the end gap.
+  // `li.dataset.pageId` is the DB id — map to the index via findIndex (never
+  // assume id == index). The fill regime uses the same tile markup + rule.
+  const gapFromEvent = useCallback((e) => {
+    const pages = selectedPagesRef.current
+    if (!pages.length) return null
+    const isList = zoom <= ZOOM_LIST_MAX
+    const t = e.target
+    const li = (t && t.closest) ? t.closest('li[data-page-id]') : null
+    if (li) {
+      const id = Number(li.dataset.pageId)
+      const i = pages.findIndex(p => p.id === id)
+      if (i === -1) return null
+      const r = li.getBoundingClientRect()
+      const after = isList
+        ? (e.clientY > r.top + r.height / 2)      // list: bottom half → after
+        : (e.clientX > r.left + r.width / 2)      // grid: right half → after
+      if (!after) return id                       // the gap BEFORE this page
+      return i + 1 < pages.length ? pages[i + 1].id : null  // AFTER → next page, or END
+    }
+    if (isList) {
+      // List BODY: the first row whose TOP is below the pointer gets the gap
+      // before it; none below → the END gap. (The same scan the preview uses.)
+      const rows = gridRef.current ? Array.from(gridRef.current.querySelectorAll('li[data-page-id]')) : []
+      for (let i = 0; i < rows.length; i++) {
+        if (e.clientY < rows[i].getBoundingClientRect().top) return pages[i].id
+      }
+      return null
+    }
+    return null   // grid GUTTER: the END gap (11.5b, unchanged)
+  }, [zoom])
+
+  // Step 11.5c — the marker: map the resolver's target to the GAP's insertion
+  // index (0..n, n = the end). null = suppressed (the drop would be a no-op —
+  // the same null planBlockDrop returns, so the indicator shows exactly when
+  // the drop would do something).
+  const resolveGridSlot = useCallback((targetId) => {
     const draggedId = dragIdRef.current
     if (draggedId == null) return null
-    const plan = planBlockDrop(draggedId, hoverPageId)
-    return plan ? plan.handleLanding : null
+    const plan = planBlockDrop(draggedId, targetId)
+    if (!plan) return null                       // suppressed: the drop is a no-op
+    const pages = selectedPagesRef.current
+    if (targetId == null) return pages.length    // the END gap (index n)
+    const i = pages.findIndex(p => p.id === targetId)
+    return i === -1 ? null : i                   // the gap BEFORE that page
   }, [planBlockDrop])
   const onGridDragOver = useCallback((e) => {
     if (dragIdRef.current === null) return   // not our drag (e.g. a file drag)
     e.preventDefault()                        // REQUIRED for the drop to be allowed
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
-    // The LIST regime (fully zoomed out) has NO per-row drop — a row drop
-    // lands LAST (the rows have no onDrop; the ul's does) — so the slot is
-    // always the end there, whichever row is under the pointer. In the
-    // grid/fill regimes resolve the hovered tile from the event target
-    // (closest() — the target is often a child of the tile, e.g. the img).
-    const isList = zoom <= ZOOM_LIST_MAX
-    const li = (!isList && e.target && e.target.closest)
-      ? e.target.closest('li[data-page-id]')
-      : null
-    setGridDropSlot(resolveGridSlot(li ? Number(li.dataset.pageId) : null))
-  }, [zoom, resolveGridSlot])
+    // Step 11.5c — ONE resolver (gapFromEvent) for the marker AND every grid
+    // drop; it handles the grid halves, the list halves, the list-body scan,
+    // and the grid gutter (→ the end gap, 11.5b). resolveGridSlot maps it to
+    // the gap's insertion index (or null when suppressed).
+    setGridDropSlot(resolveGridSlot(gapFromEvent(e)))
+  }, [resolveGridSlot, gapFromEvent])
   const onGridDragLeave = useCallback((e) => {
     // Did the pointer actually LEAVE the grid <ul>? Two signals, in order:
     //   1. relatedTarget (when the browser sets it on the dragleave): if it
@@ -945,29 +997,36 @@ export default function ComicEditor({
     }
   }, [selectedId, selectedPages, pages, csrfToken])
 
-  const onRowDrop = useCallback((e, page) => {
+  // Step 11.5c — the drop resolves the gap with the SAME resolver the marker
+  // uses (gapFromEvent), so it lands exactly where the indicator showed. The
+  // `page` argument is gone: the event's position decides the gap.
+  const onRowDrop = useCallback((e) => {
     e.preventDefault()
     e.stopPropagation()                          // keep the list-level handler out
     const draggedId = dragIdRef.current
     if (draggedId === null || reorderingRef.current) return
-    const plan = planBlockDrop(draggedId, page.id)
+    const targetId = gapFromEvent(e)
+    const plan = planBlockDrop(draggedId, targetId)
     clearDrag()
     if (!plan) return                            // self / block member / already there
     reorder(plan.next)
     commitDragActive(draggedId)                  // the dragged page becomes active
-  }, [clearDrag, reorder, planBlockDrop, commitDragActive])
+  }, [clearDrag, reorder, planBlockDrop, commitDragActive, gapFromEvent])
 
-  // Drop on the list body / a row gap → the block lands LAST.
+  // Step 11.5c — drop on the list body / a row / a row's half: the SAME
+  // resolver (gapFromEvent) decides the gap (a row's top/bottom half, the
+  // list-body scan, or the gutter → the end gap). Same flow as onRowDrop.
   const onListDrop = useCallback((e) => {
     e.preventDefault()
     const draggedId = dragIdRef.current
     if (draggedId === null || reorderingRef.current) return
-    const plan = planBlockDrop(draggedId, null)
+    const targetId = gapFromEvent(e)
+    const plan = planBlockDrop(draggedId, targetId)
     clearDrag()
-    if (!plan) return                            // the block already sits last
+    if (!plan) return                            // the drop would be a no-op
     reorder(plan.next)
     commitDragActive(draggedId)
-  }, [clearDrag, reorder, planBlockDrop, commitDragActive])
+  }, [clearDrag, reorder, planBlockDrop, commitDragActive, gapFromEvent])
 
   // --- Step 9.5: drag-reorder on the PREVIEW ----------------------------------
   //
@@ -1512,8 +1571,12 @@ export default function ComicEditor({
                   if (zoomRegime === 'list') {
                     // Step 10 — fully zoomed OUT: a vertical file-name list
                     // (no thumbnails). Click still activates + centres the
-                    // page in the preview; the reorder DnD lives in the
-                    // grid/fill regimes (nothing is draggable here).
+                    // page in the preview.
+                    // Step 11.5c — the rows are now DRAGGABLE too (the grid
+                    // tiles' drag handlers, verbatim): a row drag moves that
+                    // page / the whole selection; the ul's onDragOver + onDrop
+                    // (onGridDragOver / onListDrop) resolve the row's half +
+                    // the body with the SAME resolver the marker uses.
                     return (
                       <li
                         key={p.id}
@@ -1522,12 +1585,21 @@ export default function ComicEditor({
                           'page-list-item'
                           + (isActive ? ' page-list-item--active' : '')
                           + (isSelected ? ' page-list-item--selected' : '')
-                          // Step 11.5b — the list regime's landing slot (a row
-                          // drop lands LAST, so this is the last row — the
-                          // cell the dragged page will occupy).
-                          + (gridDropSlot === i ? ' page-list-item--drop-slot' : '')
+                          // Step 12.5e — every member of the dragged BLOCK gets
+                          // the fading cue (a lone drag = just that row).
+                          + (dragBlockIds && dragBlockIds.includes(p.id) ? ' page-list-item--dragging' : '')
+                          // Step 11.5c — the WHITE edges facing the drop GAP:
+                          // the row's TOP edge when the gap is before it
+                          // (gridDropSlot === i), its BOTTOM edge when the gap
+                          // is after it (gridDropSlot === i + 1). A middle gap
+                          // lights this row's bottom + the next row's top.
+                          + (gridDropSlot === i ? ' page-list-item--drop-edge-top' : '')
+                          + (gridDropSlot === i + 1 ? ' page-list-item--drop-edge-bottom' : '')
                         }
-                        title={`${fileNameOf(p.file_path)} — click to activate · Ctrl+click to multi-select · arrows to move · Shift+arrow to extend · Shift+click to range-select`}
+                        title={`${fileNameOf(p.file_path)} — click to activate · Ctrl+click to multi-select · arrows to move · Shift+arrow to extend · Shift+click to range-select · drag to reorder`}
+                        draggable
+                        onDragStart={e => onRowDragStart(e, p)}
+                        onDragEnd={clearDrag}
                         onClick={e => onListRowClick(e, p.id)}
                       >
                         <span className="page-list-num">Page {p.page_number}</span>
@@ -1558,19 +1630,21 @@ export default function ComicEditor({
                         // Step 12.5e — every member of the dragged BLOCK gets the
                         // fading cue (a lone drag = just that tile, as before).
                         + (dragBlockIds && dragBlockIds.includes(p.id) ? ' page-tile--dragging' : '')
-                        // Step 11.5b — the LANDING SLOT: the cell the dragged
-                        // page will occupy (the marker and the drop share the
-                        // one slot model, so a drop lands exactly here). The
-                        // grid/fill regimes only — in the list regime the
-                        // rows above take the slot instead.
-                        + (gridDropSlot === i ? ' page-tile--drop-slot' : '')
+                        // Step 11.5c — the WHITE edges facing the drop GAP:
+                        // the tile's LEFT edge when the gap is before it
+                        // (gridDropSlot === i), its RIGHT edge when the gap is
+                        // after it (gridDropSlot === i + 1). A middle gap lights
+                        // two tiles' facing edges — which may sit on DIFFERENT
+                        // rows in a wrapped grid (it marks the page-order gap).
+                        + (gridDropSlot === i ? ' page-tile--drop-edge-left' : '')
+                        + (gridDropSlot === i + 1 ? ' page-tile--drop-edge-right' : '')
                       }
                       draggable
                       title={`${fileNameOf(p.file_path)} — click to activate · Ctrl+click to multi-select · arrows to move (grid) · Shift+arrow to extend · drag to reorder · drag a selected page to move the whole selection`}
                       onClick={e => onListRowClick(e, p.id)}
                       onDragStart={e => onRowDragStart(e, p)}
                       onDragEnd={clearDrag}
-                      onDrop={e => onRowDrop(e, p)}
+                      onDrop={e => onRowDrop(e)}
                     >
                       <img src={p.file_path} alt={`Page ${p.page_number}`} />
                       <span className="page-tile-label">Page {p.page_number}</span>
