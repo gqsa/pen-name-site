@@ -827,9 +827,9 @@ export default function ComicEditor({
   //   • drop on a block member, or where the block already sits → a no-op
   //     (no marker, no reorder — "no marker" ⇔ "nothing would happen").
   // The k=1 case reproduces the user-verified Step 11.5b model exactly
-  // (h < d → h, h > d → h − 1, the no-op suppressions, gap → last) — guarded
-  // by scratch/test-step-12.5e-group.mjs (476-case equivalence + group
-  // invariants over every subset/handle/target). The 2026-09-28 inversion
+  // (h < d → h, h > d → h − 1, the no-op suppressions, gap → last) — the
+  // 476-case equivalence + group invariants (every subset/handle/target) that
+  // guard it were proven at close. The 2026-09-28 inversion
   // bug (h > d ? h : h − 1 — marker one cell off everywhere, slot −1 = no
   // marker when hovering page 1 with a later page dragged) stays documented
   // in b2-5-appendix.md §[step-11.5b].
