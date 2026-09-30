@@ -273,6 +273,19 @@ function PageBin({ title, disabled, onClick }) {
   )
 }
 
+// Step 13 — the FILE-vs-REORDER disambiguation. An OS file drag carries the
+// 'Files' type on dataTransfer; an internal tile/preview reorder drag never
+// does (it only sets 'text/plain', for Firefox's "set something or no drag"
+// requirement). The section's file-drop path fires ONLY when this is true; the
+// reorder path is separately guarded on dragIdRef !== null (which is null for
+// file drags). The two can therefore never cross-fire. Pure + case-insensitive
+// (some browsers lowercase the type) so it's safe to keep out of hook deps.
+function dragHasFiles(e) {
+  const types = e && e.dataTransfer && e.dataTransfer.types
+  if (!types) return false
+  return Array.from(types).some(t => String(t).toLowerCase() === 'files')
+}
+
 export default function ComicEditor({
   csrfToken,
   topDelta = 0,
@@ -588,18 +601,18 @@ export default function ComicEditor({
     if (selectedId === null) {
       setNotice(null)
       setError('Select or create a comic first, then add its pages.')
-      return
+      return []
     }
     if (uploadingRef.current) {
       setNotice(null)
       setError('An upload is already in progress — wait for it to finish.')
-      return
+      return []
     }
     const list = Array.from(files).filter(f => f && (f.type || '').startsWith('image/'))
     if (list.length === 0) {
       setNotice(null)
       setError('No image files in that batch — only image files are added as pages.')
-      return
+      return []
     }
     uploadingRef.current = true
     setUploading(true)
@@ -609,6 +622,7 @@ export default function ComicEditor({
     // success (never reuse a number → a 409 would stop the batch anyway).
     let nextNumber = selectedPages.reduce((m, p) => Math.max(m, Number(p.page_number) || 0), 0) + 1
     let inserted = 0
+    const newPages = []   // Step 14 — returned so a caller can splice them at a position
     try {
       for (let i = 0; i < list.length; i += 1) {
         setUploadMsg(`Uploading ${i + 1}/${list.length} — ${list[i].name || 'image'}…`)
@@ -625,6 +639,7 @@ export default function ComicEditor({
         const created = await res.json()
         const row = { id: created.id, comic_id: selectedId, page_number: nextNumber, file_path: up.file_path, caption: null }
         setPages(prev => [...prev, row])
+        newPages.push(row)
         nextNumber += 1
         inserted += 1
       }
@@ -639,6 +654,7 @@ export default function ComicEditor({
       setUploading(false)
       setUploadMsg('')
     }
+    return newPages
   }, [selectedId, selectedPages, comics, csrfToken])
 
   // --- Step 2: the three input paths -----------------------------------------
@@ -735,25 +751,45 @@ export default function ComicEditor({
     fileInputRef.current?.click()
   }, [])
 
-  // Drag/drop: preventDefault on dragover is REQUIRED for the drop to be allowed.
-  const onZoneDragOver = useCallback((e) => {
-    e.preventDefault()
+  // Step 13 — the SECTION is the file-drop catch-all: a file dragged from the
+  // OS over ANYWHERE in it (preview, tiles, empty space, the drop zone) appends
+  // it as the last page(s); the drop zone stays the visual anchor and still
+  // lights up via dragActive. These HOIST the drop zone's own dragover/leave/
+  // drop (now removed from it — the section is the single file-drop handler, so
+  // a drop on the drop zone can't double-append). Disambiguation: dragHasFiles
+  // is true only for OS file drags (internal reorder drags carry text/plain,
+  // not Files) → these ignore internal drags; the reorder handlers are guarded
+  // on dragIdRef !== null (null for file drags) → they ignore file drags. The
+  // two paths never cross-fire. preventDefault on dragover is REQUIRED to allow
+  // the drop.
+  const onSectionDragOver = useCallback((e) => {
+    if (!dragHasFiles(e)) return            // internal reorder drag → its own handlers own it
+    e.preventDefault()                       // REQUIRED to allow the drop
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
-    setDragActive(true)
+    setDragActive(true)                      // light the section ring + the drop zone anchor
+    // Step 14 — the section fires LAST in the bubble chain, so a file
+    // dragover anywhere in it reaches here. When the pointer is NOT over the
+    // grid or the preview (drop zone, the padding, anywhere outside the
+    // pages list), the EMPTY SPACE is the drop target → append at the end:
+    // clear both slots. (Some browsers leave relatedTarget null on
+    // dragleave, so a stale slot from the last surface hovered could
+    // otherwise survive — and onSectionDrop's grid-first read would let it
+    // hijack the drop position, plus leave a phantom marker behind.)
+    const t = e.target
+    const overGrid = !!(gridRef.current && t && gridRef.current.contains(t))
+    const overPreview = !!(previewRef.current && t && previewRef.current.contains(t))
+    if (!overGrid && !overPreview) {
+      setGridDropSlot(null)
+      setPreviewDropIdx(null)
+    }
   }, [])
 
-  const onZoneDragLeave = useCallback((e) => {
+  const onSectionDragLeave = useCallback((e) => {
+    if (!dragHasFiles(e)) return
     // dragleave fires when the pointer moves onto a child — ignore that.
     if (e.relatedTarget && e.currentTarget.contains(e.relatedTarget)) return
     setDragActive(false)
   }, [])
-
-  const onZoneDrop = useCallback((e) => {
-    e.preventDefault()
-    setDragActive(false)
-    const files = Array.from((e.dataTransfer && e.dataTransfer.files) || [])
-    if (files.length) addFiles(files)
-  }, [addFiles])
 
   // Double-click → the OS picker (hidden input; the same pipeline as the rest).
   const onFilePicked = useCallback((e) => {
@@ -928,16 +964,31 @@ export default function ComicEditor({
     const i = pages.findIndex(p => p.id === targetId)
     return i === -1 ? null : i                   // the gap BEFORE that page
   }, [planBlockDrop])
+  // Step 14 — the FILE-drop variant of resolveGridSlot: no dragged block, so
+  // no no-op check; the insertion index is purely the pointer's gap.
+  const resolveFileSlot = useCallback((targetId) => {
+    const pages = selectedPagesRef.current
+    if (targetId == null) return pages.length    // the END gap (index n)
+    const i = pages.findIndex(p => p.id === targetId)
+    return i === -1 ? null : i                   // the gap BEFORE that page
+  }, [])
   const onGridDragOver = useCallback((e) => {
-    if (dragIdRef.current === null) return   // not our drag (e.g. a file drag)
+    const isFile = dragHasFiles(e)
+    if (!isFile && dragIdRef.current === null) return   // not our drag (no Files, no internal drag)
     e.preventDefault()                        // REQUIRED for the drop to be allowed
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+    if (e.dataTransfer) e.dataTransfer.dropEffect = isFile ? 'copy' : 'move'
     // Step 11.5c — ONE resolver (gapFromEvent) for the marker AND every grid
     // drop; it handles the grid halves, the list halves, the list-body scan,
     // and the grid gutter (→ the end gap, 11.5b). resolveGridSlot maps it to
     // the gap's insertion index (or null when suppressed).
-    setGridDropSlot(resolveGridSlot(gapFromEvent(e)))
-  }, [resolveGridSlot, gapFromEvent])
+    // Step 14 — a FILE drag uses resolveFileSlot (no dragged block → no no-op
+    // check): the marker shows where the new page(s) will land. Claiming the
+    // grid also drops the preview's slot (the inverse is onPreviewDragLeave's
+    // job — see there): at any moment at most ONE slot is live, so
+    // onSectionDrop can never read a stale one.
+    setPreviewDropIdx(null)
+    setGridDropSlot(isFile ? resolveFileSlot(gapFromEvent(e)) : resolveGridSlot(gapFromEvent(e)))
+  }, [resolveFileSlot, resolveGridSlot, gapFromEvent])
   const onGridDragLeave = useCallback((e) => {
     // Did the pointer actually LEAVE the grid <ul>? Two signals, in order:
     //   1. relatedTarget (when the browser sets it on the dragleave): if it
@@ -967,7 +1018,9 @@ export default function ComicEditor({
     const newOrder = next.map(p => p.id)
     const currentOrder = selectedPages.map(p => p.id)
     // No-op guard: same length + same sequence = nothing to persist.
-    if (newOrder.length !== currentOrder.length || currentOrder.every((id, i) => id === newOrder[i])) return
+    // (Fixed: was `!==` + `||`, which wrongly no-op'd whenever the length
+    // differed — e.g. Step 14's insert-after-upload. Now matches the comment.)
+    if (newOrder.length === currentOrder.length && currentOrder.every((id, i) => id === newOrder[i])) return
     const prevPages = pages                     // the rollback snapshot (pre-optimistic)
     // Optimistic apply: renumber this comic's pages 1..n in the new order.
     // The rest of `pages` (other comics) is untouched.
@@ -997,14 +1050,60 @@ export default function ComicEditor({
     }
   }, [selectedId, selectedPages, pages, csrfToken])
 
+  // Step 13 — the SECTION is the file-drop catch-all: a file dropped anywhere
+  // in it appends at the end (Step 14: at the resolved slot). Defined AFTER
+  // reorder (it calls it) — a forward reference in the deps array would be a
+  // TDZ ReferenceError at mount and unmount the whole tree (black screen).
+  const onSectionDrop = useCallback(async (e) => {
+    if (!dragHasFiles(e)) return            // an internal reorder drop → its handler already did it
+    e.preventDefault()
+    setDragActive(false)
+    const files = Array.from((e.dataTransfer && e.dataTransfer.files) || [])
+    if (files.length === 0) return
+    // Step 14 — positional insert: the insertion index is the grid slot (if
+    // the pointer was over the grid) or the preview slot (if over the
+    // preview); otherwise append at the end (drop zone / empty space).
+    let insertIndex = null
+    if (typeof gridDropSlot === 'number') {
+      insertIndex = gridDropSlot
+    } else if (typeof previewDropIdx === 'number') {
+      const visible = visiblePagesRef.current
+      if (previewDropIdx < visible.length) {
+        const idx = selectedPages.findIndex(p => p.id === visible[previewDropIdx].id)
+        insertIndex = idx === -1 ? null : idx
+      } else {
+        insertIndex = selectedPages.length   // after the last visible figure → end
+      }
+    }
+    // Upload first (appends at the end — the round-1 pipeline, unchanged).
+    const newPages = await addFiles(files)
+    if (newPages.length === 0) return
+    // If there is no specific index, the end-append above is the final result.
+    if (insertIndex === null) return
+    // Splice the new pages at insertIndex and persist the new order.
+    // `selectedPages` here is the STALE closure value (length N, before
+    // addFiles) — exactly the list the slot was resolved against.
+    const newOrder = [
+      ...selectedPages.slice(0, insertIndex),
+      ...newPages,
+      ...selectedPages.slice(insertIndex),
+    ]
+    reorder(newOrder)
+  }, [gridDropSlot, previewDropIdx, selectedPages, visiblePagesRef, addFiles, reorder])
+
   // Step 11.5c — the drop resolves the gap with the SAME resolver the marker
   // uses (gapFromEvent), so it lands exactly where the indicator showed. The
   // `page` argument is gone: the event's position decides the gap.
   const onRowDrop = useCallback((e) => {
+    const draggedId = dragIdRef.current
+    // Step 13 — a FILE drop (no internal drag) is NOT a reorder: don't claim
+    // it (no preventDefault / no stopPropagation) so it bubbles on to the
+    // section's file-drop handler (onSectionDrop → append at the end). Only an
+    // internal block drag is handled here — and it stops propagation so the
+    // list-body handler doesn't also fire.
+    if (draggedId === null || reorderingRef.current) return
     e.preventDefault()
     e.stopPropagation()                          // keep the list-level handler out
-    const draggedId = dragIdRef.current
-    if (draggedId === null || reorderingRef.current) return
     const targetId = gapFromEvent(e)
     const plan = planBlockDrop(draggedId, targetId)
     clearDrag()
@@ -1047,9 +1146,12 @@ export default function ComicEditor({
   //     "all" mode that's 1:1, in "active page only" mode it's a subset.
 
   const onPreviewDragOver = useCallback((e) => {
-    if (dragIdRef.current === null) return   // not our drag (e.g. a file drag)
+    const isFile = dragHasFiles(e)
+    if (!isFile && dragIdRef.current === null) return   // not our drag
     e.preventDefault()                        // REQUIRED for the drop to be allowed
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+    if (e.dataTransfer) e.dataTransfer.dropEffect = isFile ? 'copy' : 'move'
+    // Step 14 — file drags also show the insertion bar (the slot is an index
+    // into the VISIBLE list; onSectionDrop maps it onto the full page set).
     const scroller = previewRef.current
     if (!scroller) return
     // Auto-scroll near the window's top/bottom edge (14px per event).
@@ -1065,6 +1167,12 @@ export default function ComicEditor({
       const r = figures[i].getBoundingClientRect()
       if (e.clientY < r.top + r.height / 2) { idx = i; break }
     }
+    // Claiming the preview drops the grid's slot (the inverse is
+    // onGridDragOver's job): at most ONE slot is live at any moment, so
+    // onSectionDrop can never read a stale one — even on browsers that leave
+    // relatedTarget null on dragleave (where onPreviewDragLeave's clear may
+    // have already fired, but the slot could still be a number).
+    setGridDropSlot(null)
     setPreviewDropIdx(idx)
   }, [])
 
@@ -1437,10 +1545,16 @@ export default function ComicEditor({
   // passes the pair through; the deltas live in ResizableSection.
   return (
     <ResizableSection
-      className="comic-editor"
+      className={'comic-editor' + (dragActive ? ' comic-editor--file-drag' : '')}
       storageKey="comicEditor"
       topDelta={topDelta}
       onTopDeltaChange={onTopDeltaChange}
+      // Step 13 — the section is the file-drop catch-all (a file dropped
+      // anywhere in it appends at the end). The drop zone stays the bright
+      // anchor (dragActive lights both the section ring and .dropzone--active).
+      onDragOver={onSectionDragOver}
+      onDrop={onSectionDrop}
+      onDragLeave={onSectionDragLeave}
     >
       <h2>Comic editor</h2>
       <p className="muted">
@@ -1487,20 +1601,22 @@ export default function ComicEditor({
             </button>
           </div>
 
-          {/* Step 2 — the live dropzone: THREE input paths.
-              drag/drop a batch · single click = paste · double click = picker. */}
+          {/* Step 2 — the live dropzone (the VISUAL ANCHOR). THREE input paths:
+              single click = paste · double click = picker · and Step 13 — drag
+              a file anywhere in the SECTION. This box is just the bright anchor
+              (it still lights up via dragActive); the section is the actual drop
+              target, so its dragover/drop handlers live on the section
+              (onSectionDragOver/Leave/Drop) — NOT here — and a drop on the drop
+              zone therefore can't double-append. */}
           <div
             className={
               'dropzone'
               + (dragActive ? ' dropzone--active' : '')
               + (uploading ? ' dropzone--busy' : '')
             }
-            onDragOver={onZoneDragOver}
-            onDragLeave={onZoneDragLeave}
-            onDrop={onZoneDrop}
             onClick={onZoneClick}
             onDoubleClick={onZoneDoubleClick}
-            title="Ctrl+V (or click) to paste from the clipboard · double-click to pick files · or drag a batch of images in"
+            title="Drag an image anywhere in the section to add it · Ctrl+V (or click) to paste · double-click to pick files"
           >
             {uploading ? (
               <span>{uploadMsg || 'Uploading…'}</span>
@@ -1725,9 +1841,15 @@ export default function ComicEditor({
                 // span, a page already in place, or the tail when the block
                 // already sits last — the old per-figure check missed that
                 // last case and showed a phantom bar).
-                const planAt = (slot) => draggingId !== null && slot >= 0 && slot <= visiblePages.length
-                  ? planBlockDrop(draggingId, slot < visiblePages.length ? visiblePages[slot].id : null)
-                  : null
+                // Step 14 — file drags have no no-op (the new page is always
+                // added), so the bar always shows at a valid slot.
+                const planAt = (slot) => {
+                  if (slot < 0 || slot > visiblePages.length) return null
+                  if (draggingId !== null) {
+                    return planBlockDrop(draggingId, slot < visiblePages.length ? visiblePages[slot].id : null)
+                  }
+                  return true   // file drag: always a valid insertion point
+                }
                 const showBefore = previewDropIdx === i && !!planAt(i)
                 const showAfter = previewDropIdx === i + 1 && !!planAt(i + 1)
                 return (

@@ -105,6 +105,15 @@ export default function ResizableSection({
   storageKey = null,
   topDelta = 0,
   onTopDeltaChange = null,
+  // Generic drag pass-through: any section can opt into being a drop target
+  // by forwarding these to the <section> below. The comic editor uses them
+  // for Step 13's section-level file drop (a file dropped ANYWHERE in the
+  // section appends at the end). Kept fully generic here — no comic logic in
+  // this shared component (the story / media sections + B2.8 inherit the
+  // ability without the behaviour).
+  onDragOver = null,
+  onDrop = null,
+  onDragLeave = null,
   children,
 }) {
   // bottomDelta — always internal state: the bottom edge needs no parent
@@ -201,7 +210,13 @@ export default function ResizableSection({
   }
 
   return (
-    <section className={('resizable-section ' + className).trim()} style={{ height: height + 'px' }}>
+    <section
+      className={('resizable-section ' + className).trim()}
+      style={{ height: height + 'px' }}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      onDragLeave={onDragLeave}
+    >
       <div
         className="resizable-grip resizable-grip--top"
         onPointerDown={e => startResize(e, 'top')}

@@ -68,6 +68,13 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    Step 11 — it is the generic resizable section above: fixed height, flex
    column, bottom-edge grip. */
 .comic-editor { max-width: 1100px; margin: 40px auto; padding: 0 16px; }
+/* Step 13 — the SECTION is the file-drop catch-all (a file dropped anywhere
+   in it appends at the end). While an OS file hovers the section, a subtle
+   dashed ACCENT ring signals "drop anywhere here"; the drop zone stays the
+   brighter anchor (.dropzone--active). Accent, NOT red — red is reserved for
+   selection/active (the Step 11.5c convention). An outline (not a box) so it
+   never shifts the layout or covers the grips. */
+.comic-editor--file-drag { outline: 2px dashed var(--accent); outline-offset: 3px; }
 /* Step 11 — the split fills the remaining body height and both panes
    stretch to its full height (was align-items: flex-start), so the two
    windows inside can flex-fill vertically. */
