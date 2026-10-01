@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import ResizableSection from './ResizableSection.jsx'
 
 // B2.6 — the story editor — Step-1 shell (load / select / create + read-only body).
 //
@@ -14,9 +15,16 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 //     { title, description, body } per edit burst; flush on story switch and
 //     on unmount; blank-title guard (the server would otherwise store '').
 //
-// Layout: single column, rendered INSIDE the .wrap column in App.jsx (after the
-// Tracker) — 780px is enough for a text editor, so unlike the comic editor this
-// one does not need its own wider container.
+// Layout (B2.6r): a SIBLING of `.wrap` in App.jsx, in its own `.story-editor`
+// container (portrait ~780px, landscape fluid to ~1500px — the body textarea
+// uses the width). The main branch is the generic RESIZABLE section — the
+// CANONICAL 11.5a 5th-revision grip model, the same one the comic editor
+// uses: grips on BOTH edges (both grow the section's height; the top grip
+// scrolls the page so the growth is visible) + the height persisted to
+// localStorage (gqsa.sectionHeight.storyEditor) + double-click a grip to
+// reset. initialHeight 880 ≈ the section's natural height before B2.6r
+// (portrait keeps today's look); the body's textarea flex-fills the section
+// (index.css), so the grips visibly resize the body.
 //
 // Data (B2.4 contract — pinned, don't re-derive; server.js L1198–1234):
 //   • GET /api/admin/content (GET = CSRF-exempt)
@@ -244,10 +252,13 @@ export default function StoryEditor({ csrfToken }) {
   }, [selectedId, updateDraft])
 
   // --- Loading / error (before the first fetch lands) -------------------------
+  // The loading / error branches stay plain <section>s (the comic editor's
+  // pattern) — but in the `.story-editor` container so they keep the 780px
+  // portrait width now that the section sits outside `.wrap`.
   if (stories === null) {
     if (error) {
       return (
-        <section>
+        <section className="story-editor">
           <h2>Story editor</h2>
           <div className="panel panel--warn">
             <p className="error" style={{ marginTop: 0 }}>Couldn't load the story editor.</p>
@@ -258,7 +269,7 @@ export default function StoryEditor({ csrfToken }) {
       )
     }
     return (
-      <section>
+      <section className="story-editor">
         <h2>Story editor</h2>
         <p className="muted">Loading stories…</p>
       </section>
@@ -267,8 +278,20 @@ export default function StoryEditor({ csrfToken }) {
 
   const selected = stories.find(s => s.id === selectedId) || null
 
+  // B2.6r — the CANONICAL 11.5a 5th-revision grip model (the same
+  // ResizableSection the comic editor mounts): both grips grow the section's
+  // height, the top grip scrolls the page so the growth is visible, the
+  // deltas persist to localStorage under storageKey, double-click a grip
+  // resets. initialHeight 880 ≈ the section's natural pre-B2.6r height, so
+  // portrait keeps today's look; minHeight 620 keeps the flex-filled body
+  // textarea usable (≥ ~150px) when the section is shrunk.
   return (
-    <section>
+    <ResizableSection
+      className="story-editor"
+      storageKey="storyEditor"
+      initialHeight={880}
+      minHeight={620}
+    >
       <h2>Story editor</h2>
       <p className="muted">
         Pick or create a story, then write its body — type, paste, or load a
@@ -370,6 +393,6 @@ export default function StoryEditor({ csrfToken }) {
       ) : (
         <p className="muted">Select a story to edit it.</p>
       )}
-    </section>
+    </ResizableSection>
   )
 }

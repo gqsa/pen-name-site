@@ -75,6 +75,24 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    selection/active (the Step 11.5c convention). An outline (not a box) so it
    never shifts the layout or covers the grips. */
 .comic-editor--file-drag { outline: 2px dashed var(--accent); outline-offset: 3px; }
+
+/* B2.6r — the story editor: its own SIBLING container (pulled out of the
+   780px `.wrap` in App.jsx, the pattern the comic editor uses) so each
+   editor owns its width: portrait ~780px (today's look), landscape fluid to
+   ~1500px (the media block at the bottom of this file). */
+.story-editor { max-width: 780px; margin: 40px auto; padding: 0 16px; }
+/* The body's textarea flex-fills the resizable section (like the comic's
+   panes), so the grips visibly resize the body; min-height 0 lets it absorb
+   the shrink when the section is dragged small instead of clipping the
+   section's overflow. */
+.story-editor .resizable-body textarea { flex: 1 1 auto; min-height: 0; }
+
+/* B2.6r — the small divider between adjacent editor sections (the user's
+   2026-09-27 ask): a hairline in the gap so one section's bottom grip zone
+   and the next section's top grip zone never crowd each other. The margins
+   collapse with the sections' 40px, leaving ~40px of clear space either
+   side of the line. */
+.section-divider { height: 1px; background: var(--line); width: min(780px, 92vw); margin: 12px auto; }
 /* Step 11 — the split fills the remaining body height and both panes
    stretch to its full height (was align-items: flex-start), so the two
    windows inside can flex-fill vertically. */
@@ -261,3 +279,22 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    child, so the two coexist. */
 .preview-figure--drop-before { box-shadow: 0 -5px 0 0 #fff; }
 .preview-figure--drop-after { box-shadow: 0 5px 0 0 #fff; }
+
+/* B2.6r — LANDSCAPE (a maximised window: width ≥ height) uses the side
+   space the portrait layout leaves empty; PORTRAIT (the default rules
+   above) is untouched — it works well per the owner. ONE aspect-ratio
+   block: the owner works in two states — maximised (landscape) and
+   halfscreen (portrait). */
+@media (min-aspect-ratio: 1/1) {
+  /* Story: fluid to ~1500px (never past 96vw) so the body textarea uses
+     the width. */
+  .story-editor { max-width: min(1500px, 96vw); }
+  /* Comic: the 1100px cap lifts to ~1600px (never past 96vw); the split
+     biases toward the PREVIEW pane (~1.4:1, left : right); the preview
+     thumb grows 420px → 70vh. `.page-grid` is already auto-fill, so more
+     tiles/row come for free. */
+  .comic-editor { max-width: min(1600px, 96vw); }
+  .comic-split .comic-left { flex: 1 1 0; }
+  .comic-split .comic-right { flex: 1.4 1 0; }
+  .preview-thumb { max-height: 70vh; }
+}

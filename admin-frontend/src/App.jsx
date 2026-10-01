@@ -90,13 +90,17 @@ export default function App() {
   }
 
   // status === 'ok' — the shell is live and the CSRF token is in hand.
-  // The tracker + story editor live in the 780px `.wrap` column; the comic
-  // editor is a SIBLING of `.wrap` so it can use its own wider container
-  // (`.comic-editor`) for the split view. Visually it sits directly below
-  // the story editor. Step 11.5a (FIFTH revision) — the comic's grips live
-  // entirely inside ResizableSection (both deltas grow its height; the top
-  // grip scrolls the page so the growth is visible). App owns nothing about
-  // the section's size — the `.wrap` above is never shifted.
+  // B2.6r — the tracker lives in the 780px `.wrap` column; the story editor
+  // is a SIBLING of `.wrap` in its own `.story-editor` container (the
+  // pattern the comic editor uses for `.comic-editor`) so each editor owns
+  // its width — portrait ~780px, landscape fluid (index.css media block).
+  // A small divider sits between the two editor sections (the user's
+  // 2026-09-27 ask: the story's bottom grip zone and the comic's top grip
+  // zone must never crowd each other). Step 11.5a (FIFTH revision) — the
+  // sections' grips live entirely inside ResizableSection (both deltas grow
+  // the section's height; the top grip scrolls the page so the growth is
+  // visible). App owns nothing about a section's size — `.wrap` is never
+  // shifted.
   return (
     <>
       <div className="wrap">
@@ -107,8 +111,10 @@ export default function App() {
           B2.5–B2.7, the announcements panel in B2.9.
         </p>
         <Tracker csrfToken={state.csrfToken} />
-        <StoryEditor csrfToken={state.csrfToken} />
       </div>
+      <StoryEditor csrfToken={state.csrfToken} />
+      {/* B2.6r — the small divider between adjacent editor sections. */}
+      <div className="section-divider" aria-hidden="true"></div>
       <ComicEditor csrfToken={state.csrfToken} />
       {/* Page-bottom nav (moved 2026-10-01: it sat between the story and comic
           editors — the user wants it at the bottom of the page, centred). */}
