@@ -111,8 +111,8 @@ export default function App() {
       </div>
       <ComicEditor csrfToken={state.csrfToken} />
       {/* Page-bottom nav (moved 2026-10-01: it sat between the story and comic
-          editors — the user wants it at the bottom of the page). */}
-      <p style={{ marginTop: '26px' }}>
+          editors — the user wants it at the bottom of the page, centred). */}
+      <p style={{ marginTop: '26px', textAlign: 'center' }}>
         <a href="/dashboard">Dashboard</a> · <a href="/">Home</a> · <a href="/logout">Log out</a>
       </p>
     </>
