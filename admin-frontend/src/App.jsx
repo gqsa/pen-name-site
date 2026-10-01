@@ -108,11 +108,13 @@ export default function App() {
         </p>
         <Tracker csrfToken={state.csrfToken} />
         <StoryEditor csrfToken={state.csrfToken} />
-        <p style={{ marginTop: '26px' }}>
-          <a href="/dashboard">Dashboard</a> · <a href="/">Home</a> · <a href="/logout">Log out</a>
-        </p>
       </div>
       <ComicEditor csrfToken={state.csrfToken} />
+      {/* Page-bottom nav (moved 2026-10-01: it sat between the story and comic
+          editors — the user wants it at the bottom of the page). */}
+      <p style={{ marginTop: '26px' }}>
+        <a href="/dashboard">Dashboard</a> · <a href="/">Home</a> · <a href="/logout">Log out</a>
+      </p>
     </>
   )
 }
