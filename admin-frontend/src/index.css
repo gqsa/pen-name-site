@@ -89,6 +89,41 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    section's overflow. */
 .story-editor .resizable-body textarea { flex: 1 1 auto; min-height: 0; }
 
+/* B2.7 — the media editor: its own SIBLING container (like the story / comic
+   editors), SAME width in BOTH orientations (portrait 1100px here; landscape
+   min(1600px, 96vw) in the media block at the bottom of this file). It mounts
+   the same generic ResizableSection, so `.resizable-section` / `-body` /
+   `-grip` above apply unchanged. */
+.media-editor { max-width: 1100px; margin: 40px auto; padding: 0 16px; }
+/* The SECTION is the file-drop catch-all (the same Step-13 pattern the comic
+   editor uses): while an OS file hovers it, a subtle dashed ACCENT ring
+   signals "drop anywhere here". An outline (not a box) so it never shifts the
+   layout or covers the grips. */
+.media-editor--file-drag { outline: 2px dashed var(--accent); outline-offset: 3px; }
+/* The item LIST flex-fills the resizable body and scrolls internally (the
+   header above it — h2 / muted / tabs / dropzone — keeps its natural size). */
+.media-editor .resizable-body .media-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+/* Tabs — the active tab is the upload kind + the drop/paste filter. The pill
+   family matches `.preview-toggle` (the comic editor's toggle pills). */
+.media-tabs { display: flex; gap: 8px; margin-top: 14px; }
+.media-tab { padding: 4px 14px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--muted); }
+.media-tab:hover { border-color: var(--accent); }
+.media-tab--on { border-color: var(--accent); color: var(--ink); background: var(--accent-soft); }
+/* One item = a card: the preview (fixed 180px, object-fit contain — an image /
+   video must stay wholly visible to identify it) + the editable fields column. */
+.media-item { display: flex; gap: 16px; align-items: flex-start; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-top: 14px; }
+.media-item-preview { flex: 0 0 auto; width: 180px; height: 180px; background: #000; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.media-item-preview img, .media-item-preview video { display: block; width: 100%; height: 100%; object-fit: contain; }
+.media-item-fields { flex: 1 1 auto; min-width: 0; }
+/* The muted file-name line (the owner's own name — the uuid folder is opaque). */
+.media-item-file { margin: 8px 0 0; font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The member-flag row (is_member): a checkbox + inline label, muted like the
+   file line so it reads as a secondary control, not a text field. */
+.media-item-flag { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: .85rem; color: var(--muted); cursor: pointer; user-select: none; }
+.media-item-flag input { margin: 0; accent-color: var(--accent); }
+/* The Delete button + the per-item saving/saved/error cues, in one row. */
+.media-item-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+
 /* B2.6r — the small divider between adjacent editor sections (the user's
    2026-09-27 ask): a hairline in the gap so one section's bottom grip zone
    and the next section's top grip zone never crowd each other. The margins
@@ -301,6 +336,10 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
   .comic-split .comic-left { flex: 1 1 0; }
   .comic-split .comic-right { flex: 1.4 1 0; }
   .preview-thumb { max-height: 70vh; }
+  /* Media: the SAME width as the other two editors — the item cards use the
+     room, and the previews grow a little. */
+  .media-editor { max-width: min(1600px, 96vw); }
+  .media-item-preview { width: 240px; height: 240px; }
   /* The divider tracks the sections' width in landscape too. */
   .section-divider { width: min(1600px, 96vw); }
 }

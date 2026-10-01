@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import Tracker from './Tracker.jsx'
 import StoryEditor from './StoryEditor.jsx'
 import ComicEditor from './ComicEditor.jsx'
+import MediaEditor from './MediaEditor.jsx'
 
 // B2.2 — the admin shell.
 //
@@ -118,6 +119,11 @@ export default function App() {
       {/* B2.6r — the small divider between adjacent editor sections. */}
       <div className="section-divider" aria-hidden="true"></div>
       <ComicEditor csrfToken={state.csrfToken} />
+      {/* B2.7 — the SECOND divider (between the comic and media sections, so
+          their grip zones never crowd — the same 2026-09-27 ask the first
+          divider above serves for story/comic). */}
+      <div className="section-divider" aria-hidden="true"></div>
+      <MediaEditor csrfToken={state.csrfToken} />
       {/* Page-bottom nav (moved 2026-10-01: it sat between the story and comic
           editors — the user wants it at the bottom of the page, centred). */}
       <p style={{ marginTop: '26px', textAlign: 'center' }}>
