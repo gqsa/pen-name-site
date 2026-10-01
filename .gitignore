@@ -41,6 +41,9 @@ admin-frontend/dist/
 # B2.4: upload artifacts (binary content, regenerable — Render's free-tier disk
 # is wiped on every restart per C3, and we re-upload test content each time)
 public/uploads/
+# uploads-backup/ — the local mirror kept by uploads-backup.mjs (2026-10-01 wipe
+# incident: the only local copy of the lost images; same rule as public/uploads)
+uploads-backup/
 
 # test_images/ — user-supplied verification images (workspace-only, never part of the site)
 test_images/
