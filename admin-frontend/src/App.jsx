@@ -92,8 +92,10 @@ export default function App() {
   // status === 'ok' — the shell is live and the CSRF token is in hand.
   // B2.6r — the tracker lives in the 780px `.wrap` column; the story editor
   // is a SIBLING of `.wrap` in its own `.story-editor` container (the
-  // pattern the comic editor uses for `.comic-editor`) so each editor owns
-  // its width — portrait ~780px, landscape fluid (index.css media block).
+  // pattern the comic editor uses for `.comic-editor`). User follow-up
+  // 2026-10-01: the story editor now matches `.comic-editor`'s width in
+  // BOTH orientations (portrait 1100px, landscape min(1600px, 96vw) — the
+  // index.css media block).
   // A small divider sits between the two editor sections (the user's
   // 2026-09-27 ask: the story's bottom grip zone and the comic's top grip
   // zone must never crowd each other). Step 11.5a (FIFTH revision) — the

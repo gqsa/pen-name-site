@@ -16,15 +16,16 @@ import ResizableSection from './ResizableSection.jsx'
 //     on unmount; blank-title guard (the server would otherwise store '').
 //
 // Layout (B2.6r): a SIBLING of `.wrap` in App.jsx, in its own `.story-editor`
-// container (portrait ~780px, landscape fluid to ~1500px — the body textarea
-// uses the width). The main branch is the generic RESIZABLE section — the
-// CANONICAL 11.5a 5th-revision grip model, the same one the comic editor
-// uses: grips on BOTH edges (both grow the section's height; the top grip
-// scrolls the page so the growth is visible) + the height persisted to
-// localStorage (gqsa.sectionHeight.storyEditor) + double-click a grip to
-// reset. initialHeight 880 ≈ the section's natural height before B2.6r
-// (portrait keeps today's look); the body's textarea flex-fills the section
-// (index.css), so the grips visibly resize the body.
+// container — SAME width as `.comic-editor` in both orientations (user
+// follow-up 2026-10-01: portrait 1100px, landscape min(1600px, 96vw) — the
+// body textarea uses the width). The main branch is the generic RESIZABLE
+// section — the CANONICAL 11.5a 5th-revision grip model, the same one the
+// comic editor uses: grips on BOTH edges (both grow the section's height;
+// the top grip scrolls the page so the growth is visible) + the height
+// persisted to localStorage (gqsa.sectionHeight.storyEditor) + double-click
+// a grip to reset. initialHeight 880 ≈ the section's natural height before
+// B2.6r (portrait keeps today's look); the body's textarea flex-fills the
+// section (index.css), so the grips visibly resize the body.
 //
 // Data (B2.4 contract — pinned, don't re-derive; server.js L1198–1234):
 //   • GET /api/admin/content (GET = CSRF-exempt)
@@ -253,8 +254,9 @@ export default function StoryEditor({ csrfToken }) {
 
   // --- Loading / error (before the first fetch lands) -------------------------
   // The loading / error branches stay plain <section>s (the comic editor's
-  // pattern) — but in the `.story-editor` container so they keep the 780px
-  // portrait width now that the section sits outside `.wrap`.
+  // pattern) — but in the `.story-editor` container so they keep the 1100px
+  // portrait width (the comic editor's width) now that the section sits
+  // outside `.wrap`.
   if (stories === null) {
     if (error) {
       return (
