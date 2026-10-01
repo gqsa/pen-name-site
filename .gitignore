@@ -29,6 +29,12 @@ b[0-9]*.md
 instruct.md
 process.md
 process-series.md
+# scratch.md — the session working scratchpad (condensed memory / gotchas,
+# updated as work proceeds — same rule: workspace-only, never committed).
+scratch.md
+# scratch/ — workspace-only session artifacts (test scripts, sandbox shims —
+# e.g. vite-netuse-shim.cjs; same rule: never committed).
+scratch/
 
 # A3 email outbox (local inspection/test artifact of the "file" transport)
 .mailoutbox.json
