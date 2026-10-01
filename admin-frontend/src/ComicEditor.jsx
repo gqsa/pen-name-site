@@ -191,6 +191,29 @@ function storeZoom(z) {
   try { window.localStorage.setItem(ZOOM_STORAGE_KEY, String(z)) } catch { /* session-only */ }
 }
 
+// 2026-09-28 — remember the SELECTED comic (the one the owner has open).
+// ONE global value (not per-comic): it survives a hard reload so the editor
+// re-opens the comic the owner was working on, instead of always snapping
+// back to the first comic. Same posture as the tile zoom above:
+// localStorage is browser-side (survives Render's free-tier disk wipes) and
+// try/catch'd — a blocked storage degrades to the default (first comic).
+// The id is validated against the live comic list in `load()` (a stale id —
+// the comic was deleted — falls back to the first comic and the effect below
+// overwrites the stored value with the valid one).
+const SELECTED_COMIC_STORAGE_KEY = 'gqsa.comicSelected'
+function readStoredSelectedComic() {
+  try {
+    const raw = window.localStorage.getItem(SELECTED_COMIC_STORAGE_KEY)
+    if (raw == null) return null
+    const n = Number.parseInt(raw, 10)
+    if (!Number.isFinite(n) || n < 1) return null
+    return n
+  } catch { return null }
+}
+function storeSelectedComic(id) {
+  try { window.localStorage.setItem(SELECTED_COMIC_STORAGE_KEY, String(id)) } catch { /* session-only */ }
+}
+
 // 2026-09-28 follow-up — WINDOW-scoped scroll helpers. The old centre effect
 // used `el.scrollIntoView()`, which scrolls EVERY scrollable ancestor up to
 // the viewport — including the DOCUMENT itself: with the active page on
@@ -288,15 +311,18 @@ function dragHasFiles(e) {
 
 export default function ComicEditor({
   csrfToken,
-  topDelta = 0,
-  onTopDeltaChange = null,
 }) {
   // comics: array (null until the first fetch lands) — the full comic list.
   // pages : array — ALL comics' pages from the same fetch (keyed `pages`).
   // selectedId: the id of the comic being edited (a number, matching the DB id).
   const [comics, setComics] = useState(null)
   const [pages, setPages] = useState([])
-  const [selectedId, setSelectedId] = useState(null)
+  // 2026-09-28 — initialised from the remembered selection (the comic the
+  // owner last had open) instead of null, so a hard reload re-opens it. `load()`
+  // validates the id against the live list (a stale one falls back to the
+  // first comic). A fresh browser (no stored value) starts at null, exactly
+  // as before, and `load()` picks the first comic.
+  const [selectedId, setSelectedId] = useState(() => readStoredSelectedComic())
   const [newTitle, setNewTitle] = useState('')
   const [error, setError] = useState(null)
   const [creating, setCreating] = useState(false)
@@ -405,15 +431,30 @@ export default function ComicEditor({
       const list = Array.isArray(data.comics) ? data.comics : []
       setComics(list)
       setPages(Array.isArray(data.pages) ? data.pages : [])
-      // Default selection = the first comic, or null if there are none. A reload
-      // keeps a selection the owner already made (prev !== null).
-      setSelectedId(prev => (prev !== null ? prev : (list.length ? list[0].id : null)))
+      // Default selection = the REMEMBERED comic (2026-09-28 — persists across
+      // hard reloads) if it is still in the live list; else the first comic;
+      // else null if there are none. A stale remembered id (the comic was
+      // deleted) falls back to the first comic, and the persistence effect
+      // below then overwrites the stored value with the valid one.
+      setSelectedId(prev =>
+        (prev !== null && list.some(c => c.id === prev))
+          ? prev
+          : (list.length ? list[0].id : null))
     } catch (err) {
       setError(err.message)
     }
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  // 2026-09-28 — persist the selected comic so a hard reload re-opens it.
+  // Runs on every selection change (picking a comic, the load() fallback, a
+  // comic being created). A null selection (no comics yet) is NOT persisted —
+  // there is nothing to remember, and the stored value stays as it was.
+  useEffect(() => {
+    if (selectedId === null) return
+    storeSelectedComic(selectedId)
+  }, [selectedId])
 
   // The selected comic's pages, in reading order. Drives BOTH the left list and
   // the right preview, so the two can't drift apart.
@@ -1537,18 +1578,15 @@ export default function ComicEditor({
   // reusable by the story / media sections + B2.8): fixed height (state) + grips
   // on both edges that drag-resize it; the two windows inside flex-fill +
   // scroll internally. The loading / error branches above stay plain <section>s.
-  // Step 11.5a (fourth revision — the current one) — two deltas: the BOTTOM
-  // grip changes the height (bottom edge follows the pointer, top edge fixed,
-  // the page grows at the bottom); the TOP grip moves the top edge with the
-  // pointer (bottom edge fixed) via `topDelta` / `onTopDeltaChange` — App
-  // shifts the content above (its `.wrap`) to make room. This component only
-  // passes the pair through; the deltas live in ResizableSection.
+  // Step 11.5a (FIFTH revision — the current one) — two deltas, both grow the
+  // section's height (the bottom grip at the bottom edge, the top grip with a
+  // parallel page scroll so the growth is visible). No content-above shift —
+  // ResizableSection owns both deltas + the grips + persistence; this
+  // component just mounts it.
   return (
     <ResizableSection
       className={'comic-editor' + (dragActive ? ' comic-editor--file-drag' : '')}
       storageKey="comicEditor"
-      topDelta={topDelta}
-      onTopDeltaChange={onTopDeltaChange}
       // Step 13 — the section is the file-drop catch-all (a file dropped
       // anywhere in it appends at the end). The drop zone stays the bright
       // anchor (dragActive lights both the section ring and .dropzone--active).

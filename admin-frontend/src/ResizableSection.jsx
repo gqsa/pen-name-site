@@ -4,27 +4,27 @@ import { useEffect, useState } from 'react'
 // a <section> whose height is base + two independent deltas, a flex body that
 // fills, and grip strips on the TOP and BOTTOM edges.
 //
-// Edge model (2026-09-28, FOURTH revision — the current one):
+// Edge model (2026-09-28, FIFTH revision — the current one):
 //
 //   height = baseHeight + topDelta + bottomDelta          (clamped 480..1400)
 //
-//   • TOP grip — drag up → taller, down → shorter. The section's TOP EDGE
-//     follows the pointer and the BOTTOM EDGE stays fixed. A section can't
-//     pull its flow position upward by itself (whatever sits above it is in
-//     the way — its own negative margin can't beat the gap's margin
-//     collapsing), so the shift happens on the content ABOVE: the parent
-//     shifts it up by `topDelta` (margin-top = baseMargin − topDelta). This
-//     component reports its topDelta through `onTopDeltaChange`; the parent
-//     applies the margin. (It is base−Δ, NOT a bare −Δ: a bare negative
-//     margin would shift the content above by base+Δ and the top edge would
-//     overshoot the pointer by the whole base margin.)
-//   • BOTTOM grip — drag down → taller, up → shorter. The section's BOTTOM
-//     edge follows the pointer and the TOP edge stays fixed. Only the height
-//     changes; normal flow pushes whatever is below down — the page grows at
-//     the bottom.
+//   BOTH grips simply GROW the section's height — neither ever shifts the
+//   content above (that was the 4th revision's mechanism and the source of
+//   the top clipping / gapping). The only difference is the scroll:
 //
-//   Neither grip ever changes another section's HEIGHT. A section above only
-//   MOVES (it is part of the content above) when the top grip is dragged.
+//   • TOP grip — drag up → taller, down → shorter. The section grows (the
+//     growth is "below", like the bottom grip) AND the page scrolls DOWN by
+//     the same amount (window.scrollBy, incremental). Net in the viewport:
+//     the bottom edge stays put, the top edge + grip climb up under the
+//     pointer, so the user SEES the section get taller. The content above is
+//     never shifted — it just scrolls up, reachable by scrolling back.
+//   • BOTTOM grip — drag down → taller, up → shorter. The section grows;
+//     normal flow pushes whatever is below down — the page grows at the
+//     bottom. No scroll (the growth is already visible at the bottom edge).
+//
+//   Neither grip ever changes another section's HEIGHT, and neither moves
+//   any other element's layout position — the top grip's scroll is a
+//   viewport effect only (it doesn't change the document flow at all).
 //
 // History — why this revision (the user rejected the ones before it):
 //   1st — the top grip moved the section with `transform: translateY` (it
@@ -34,16 +34,21 @@ import { useEffect, useState } from 'react'
 //   3rd — both grips changed only this section's height (the grow directions
 //         did nothing visible — the edge never followed the pointer —
 //         rejected).
-//   4th — THIS: two deltas; the top edge follows the pointer via the
-//         content-above shift, the bottom edge via the height.
+//   4th — two deltas; the top edge followed the pointer via the
+//         content-above shift, the bottom edge via the height (the shift
+//         clipped the heading at the very top / gapped when the content
+//         above was small — rejected).
+//   5th — THIS: both grips grow the height (no content-above shift); the
+//         top grip additionally scrolls the page down by the drag amount so
+//         the growth is visible (top edge climbs under the pointer, bottom
+//         edge stays put).
 //
 // pointerdown on a grip → pointermove tracked on window → clamped set →
 // pointerup releases + commits. Nothing in here knows about comics or
 // stories, so the story / media editor sections (and B2.8 — editor-section
 // minimise) can mount one per section and each keeps its own deltas + grips
-// for free (a section mounted WITHOUT `onTopDeltaChange` degrades to
-// height-only resizing — there is no content above for the parent to shift,
-// so the top edge doesn't follow the pointer; the bottom grip is full).
+// for free. Both grips are full in every context (the 5th revision dropped
+// the controlled / content-above-shift mode, so there is no fallback path).
 //
 // Lifetime: when a `storageKey` is given, BOTH deltas persist to
 // localStorage under `gqsa.sectionHeight.<key>` as `{"t":<top>,"b":<bottom>}`
@@ -103,8 +108,6 @@ export default function ResizableSection({
   minHeight = MIN_H,
   maxHeight = MAX_H,
   storageKey = null,
-  topDelta = 0,
-  onTopDeltaChange = null,
   // Generic drag pass-through: any section can opt into being a drop target
   // by forwarding these to the <section> below. The comic editor uses them
   // for Step 13's section-level file drop (a file dropped ANYWHERE in the
@@ -121,17 +124,13 @@ export default function ResizableSection({
   const [bottomDelta, setBottomDelta] = useState(() =>
     storageKey != null ? readStoredDeltas(storageKey, initialHeight, minHeight, maxHeight).b : 0,
   )
-  // topDelta — CONTROLLED when the parent is given (it applies the
-  // content-above shift); otherwise internal state (the height-only
-  // fallback above). NOTE: in controlled mode the PARENT must initialize
-  // `topDelta` from the same readStoredDeltas() so the first paint is
-  // already shifted — the child never pushes it, so a parent that starts
-  // from 0 would flash the un-shifted layout for a frame.
-  const [internalTop, setInternalTop] = useState(() =>
+  // 5th revision — topDelta is internal state (the 4th revision's controlled
+  // mode + content-above shift is gone; the parent no longer owns the delta).
+  // The section simply GROWS by it (height = base + top + bottom); the TOP
+  // grip additionally scrolls the page so the growth is visible (startResize).
+  const [top, setTop] = useState(() =>
     storageKey != null ? readStoredDeltas(storageKey, initialHeight, minHeight, maxHeight).t : 0,
   )
-  const top = onTopDeltaChange ? topDelta : internalTop
-  const setTop = onTopDeltaChange || setInternalTop
 
   // One-shot cleanup: the FIRST revision stored a `pull` (a translateY that
   // painted over the section above). The model no longer has one — drop the
@@ -143,15 +142,19 @@ export default function ResizableSection({
   const height = initialHeight + top + bottomDelta
 
   // ONE handler for BOTH grips. `edge` is 'top' or 'bottom'; `dy` is the
-  // pointer delta (down is +):
-  //   • top grip    → the TOP edge follows the pointer:
-  //                   topDelta = start − dy (drag up: dy<0 → topDelta grows
-  //                   → taller; the content above shifts up by the same
-  //                   amount; the bottom edge stays fixed)
-  //   • bottom grip → the BOTTOM edge follows the pointer:
-  //                   bottomDelta = start + dy (drag down: dy>0 → taller;
-  //                   normal flow pushes the content below down; the top
-  //                   edge stays fixed)
+  // pointer delta (down is +). 5th revision — BOTH grips grow the section's
+  // height (no content-above shift); the TOP grip additionally scrolls the
+  // page so the growth is visible:
+  //   • top grip    → the section grows (topDelta = start − dy; drag up:
+  //                   dy<0 → taller) AND the page scrolls DOWN by the same
+  //                   amount. Net in the viewport: the bottom edge stays put,
+  //                   the top edge + grip climb up under the pointer, so you
+  //                   SEE the section get taller. The content above is never
+  //                   shifted — it just scrolls up (reachable by scrolling).
+  //   • bottom grip → the section grows (bottomDelta = start + dy; drag down:
+  //                   dy>0 → taller); normal flow pushes the content below
+  //                   down; the top edge stays fixed. No scroll (the growth
+  //                   is already visible at the bottom edge).
   // The TOTAL height is clamped to [minHeight, maxHeight]: whichever limit
   // hits first freezes that edge's drag (the other delta is untouched).
   const startResize = (e, edge) => {
@@ -171,8 +174,20 @@ export default function ResizableSection({
         const total = initialHeight + t + startBottom
         if (total < minHeight) t = minHeight - initialHeight - startBottom
         else if (total > maxHeight) t = maxHeight - initialHeight - startBottom
+        // 5th revision — the section GROWS by (t − lastTop) and the page
+        // SCROLLS DOWN by that same amount (window.scrollBy, incremental —
+        // the change since the last move, not the total from the start). The
+        // growth is "below" like the bottom grip, so without the scroll it
+        // would be out of view; the scroll keeps the bottom edge put and lets
+        // the top edge + grip climb up under the pointer, so the user sees
+        // the section get taller. Clamping is honoured: if the section can't
+        // grow (already at the limit) growth is 0 and there is no scroll.
+        const growth = t - lastTop
         lastTop = t
         setTop(t)
+        // behavior:'instant' overrides any CSS scroll-behavior:smooth so the
+        // scroll tracks the pointer exactly during the drag (no animation lag).
+        if (growth !== 0) window.scrollBy({ top: growth, behavior: 'instant' })
       } else {
         let b = startBottom + dy
         const total = initialHeight + startTop + b
