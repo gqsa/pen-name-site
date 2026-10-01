@@ -46,13 +46,125 @@ export default function StoryEditor({ csrfToken }) {
   const fileRef = useRef(null)      // hidden <input type="file"> for the body upload
   const [loadingFile, setLoadingFile] = useState(false)
 
+  // Step 3 — auto-save (the pattern = the ComicEditor caption debouncer,
+  // adapted to a single-story draft): ~600 ms debounce → ONE PUT per edit
+  // burst; flush on story switch and on unmount (a switch must never lose
+  // the last burst). `save` = null | 'saving' | 'saved' | 'error' (the cue
+  // in the theme); `saveError` = the message behind an 'error'.
+  // `dirtyVersion` = 0 while the draft is clean, bumped on every edit — a
+  // save only clears it if nothing was edited while it was in flight, so a
+  // burst that lands mid-save still gets saved.
+  const [save, setSave] = useState(null)
+  const [saveError, setSaveError] = useState(null)
+  const saveTimer = useRef(null)    // the pending debounce timeout
+  const dirtyVersion = useRef(0)
+  const draftRef = useRef(null)     // always the latest draft — the flush paths must not trust a stale closure
+  useEffect(() => { draftRef.current = draft }, [draft])
+
   useEffect(() => {
     if (selectedId === null) { draftForId.current = null; setDraft(null); return }
     if (draftForId.current === selectedId) return
     const s = stories.find(x => x.id === selectedId)
     draftForId.current = selectedId
+    dirtyVersion.current = 0   // a fresh draft (from the server) is clean — no save owed
     setDraft(s ? { title: s.title ?? '', description: s.description ?? '', body: s.body ?? '' } : null)
   }, [selectedId, stories])
+
+  // --- Step 3: auto-save ------------------------------------------------------
+  // The PUT payload for a draft — the server's PARTIAL semantics (server.js
+  // L1258: `b.title ?? row.title` …): a field OMITTED keeps the row's value,
+  // so the blank-title guard = OMIT the title (sending '' would store '' and
+  // clobber the stored title). description / body always go — an explicit ''
+  // there is a real clear (the owner emptied the field).
+  const buildPayload = (values) => {
+    const payload = { description: values.description ?? '', body: values.body ?? '' }
+    if ((values.title ?? '').trim() !== '') payload.title = values.title
+    return payload
+  }
+
+  const saveNow = useCallback(async (id, values, version) => {
+    setSave('saving')
+    setSaveError(null)
+    try {
+      const res = await fetch(`/api/admin/stories/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify(buildPayload(values)),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `save answered ${res.status}`)
+      }
+      if (dirtyVersion.current === version) dirtyVersion.current = 0
+      // Keep the story list (the select dropdown) in sync with what was saved.
+      const stored = buildPayload(values)
+      setStories(prev => (prev === null ? prev : prev.map(s => (s.id === id
+        ? { ...s, title: stored.title ?? s.title, description: stored.description, body: stored.body }
+        : s))))
+      setSave('saved')
+    } catch (err) {
+      setSave('error')
+      setSaveError(err.message)
+    }
+  }, [csrfToken])
+
+  // ~600 ms debounce: ONE PUT per edit burst (no save button by design). Only
+  // a dirty draft schedules a save (a fresh selection loads clean).
+  useEffect(() => {
+    if (draft === null || dirtyVersion.current === 0) return undefined
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null }
+    saveTimer.current = setTimeout(() => {
+      saveTimer.current = null
+      const v = dirtyVersion.current
+      if (v === 0) return
+      if (draftForId.current !== null) void saveNow(draftForId.current, draftRef.current, v)
+    }, 600)
+  }, [draft, saveNow])
+
+  // The 'saved' cue is a MOMENT, not a state (the ComicEditor caption
+  // pattern) — it fades out after ~3 s. Only a FAILED save lingers.
+  useEffect(() => {
+    if (save !== 'saved') return undefined
+    const t = setTimeout(() => setSave(null), 3000)
+    return () => clearTimeout(t)
+  }, [save])
+
+  // Switching stories FLUSHES the outgoing story's pending burst first — a
+  // switch must never lose the last burst (an in-flight save, if any, already
+  // owns its captured copy).
+  const onStorySelect = useCallback((e) => {
+    const next = e.target.value ? Number(e.target.value) : null
+    if (next === selectedId) return
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null }
+    if (dirtyVersion.current > 0 && draftForId.current !== null && draftRef.current) {
+      void saveNow(draftForId.current, draftRef.current, dirtyVersion.current)
+    }
+    setSelectedId(next)
+  }, [selectedId, saveNow])
+
+  // Unmount: flush a pending burst (best effort — keepalive lets the request
+  // outlive the unmount; a body over the 64 KB keepalive limit just drops).
+  useEffect(() => () => {
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null }
+    if (dirtyVersion.current === 0 || draftForId.current === null || !draftRef.current) return
+    const id = draftForId.current
+    fetch(`/api/admin/stories/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      body: JSON.stringify(buildPayload(draftRef.current)),
+      keepalive: true,
+    }).catch(() => {})
+    dirtyVersion.current = 0
+  }, [csrfToken])
+
+  // One edit = one working-copy update + a dirty bump (the debounce effect
+  // above sees the new draft and schedules the burst's save). Re-editing also
+  // clears a stale 'error' cue (the ComicEditor caption pattern).
+  const updateDraft = useCallback((patch) => {
+    setDraft(d => (d ? { ...d, ...patch } : d))
+    dirtyVersion.current += 1
+    if (save === 'error') setSave(null)
+  }, [save])
 
   const load = useCallback(async () => {
     setError(null)
@@ -122,14 +234,14 @@ export default function StoryEditor({ csrfToken }) {
     setNotice(null)
     try {
       const text = await file.text()
-      setDraft(d => (d ? { ...d, body: text } : d))
+      updateDraft({ body: text })   // the dirty bump schedules the auto-save
       setNotice(`Loaded ${text.length} character${text.length === 1 ? '' : 's'} from “${file.name || 'the file'}” into the body.`)
     } catch (err) {
       setError('Could not read that file — ' + err.message)
     } finally {
       setLoadingFile(false)
     }
-  }, [selectedId])
+  }, [selectedId, updateDraft])
 
   // --- Loading / error (before the first fetch lands) -------------------------
   if (stories === null) {
@@ -160,7 +272,7 @@ export default function StoryEditor({ csrfToken }) {
       <h2>Story editor</h2>
       <p className="muted">
         Pick or create a story, then write its body — type, paste, or load a
-        .txt file (landing in the next B2.6 steps).
+        .txt file. It auto-saves as you edit (no save button).
       </p>
 
       {error && (
@@ -175,7 +287,7 @@ export default function StoryEditor({ csrfToken }) {
       <select
         id="story-select"
         value={selectedId ?? ''}
-        onChange={e => setSelectedId(e.target.value ? Number(e.target.value) : null)}
+        onChange={onStorySelect}
       >
         {stories.length === 0 && <option value="">(no stories yet — create one below)</option>}
         {stories.map(s => (
@@ -204,7 +316,7 @@ export default function StoryEditor({ csrfToken }) {
             id="story-title"
             type="text"
             value={draft.title}
-            onChange={e => setDraft(d => (d ? { ...d, title: e.target.value } : d))}
+            onChange={e => updateDraft({ title: e.target.value })}
           />
 
           <label htmlFor="story-desc">Description (optional)</label>
@@ -213,12 +325,22 @@ export default function StoryEditor({ csrfToken }) {
             type="text"
             value={draft.description}
             placeholder="Shown on the story's card, if at all…"
-            onChange={e => setDraft(d => (d ? { ...d, description: e.target.value } : d))}
+            onChange={e => updateDraft({ description: e.target.value })}
           />
 
           <h3 style={{ margin: '18px 0 4px' }}>
             <span>Body</span>
             <span className="muted" style={{ fontWeight: 400 }}> — {draft.body.length} characters</span>
+            {save === 'saving' ? (
+              <span className="caption-status" style={{ display: 'inline-block', margin: '0 0 0 10px', verticalAlign: 'middle', fontSize: 12 }} role="status">
+                Saving…
+              </span>
+            ) : null}
+            {save === 'saved' ? (
+              <span className="caption-status" style={{ display: 'inline-block', margin: '0 0 0 10px', verticalAlign: 'middle', fontSize: 12 }} role="status">
+                Saved
+              </span>
+            ) : null}
             <span style={{ float: 'right' }}>
               <button style={{ padding: '4px 10px' }} onClick={() => fileRef.current?.click()} disabled={loadingFile}>
                 {loadingFile ? 'Loading…' : 'Load text file'}
@@ -230,8 +352,13 @@ export default function StoryEditor({ csrfToken }) {
             aria-label="Story body"
             placeholder="Write the story body here, paste text, or load a .txt file…"
             value={draft.body}
-            onChange={e => setDraft(d => (d ? { ...d, body: e.target.value } : d))}
+            onChange={e => updateDraft({ body: e.target.value })}
           />
+          {save === 'error' && (
+            <p className="caption-status error" role="alert">
+              Save failed — {saveError} (your text is still here; the next edit re-sends it)
+            </p>
+          )}
           <input
             ref={fileRef}
             type="file"
