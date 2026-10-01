@@ -24,6 +24,11 @@ progress.md
 progress-appendix.md
 paypal-skill.md
 b[0-9]*.md
+# The "start here" sliding window + the project-agnostic process playbooks
+# (added 2026-10-01, Step 16 close — same rule: workspace-only, never committed).
+instruct.md
+process.md
+process-series.md
 
 # A3 email outbox (local inspection/test artifact of the "file" transport)
 .mailoutbox.json
