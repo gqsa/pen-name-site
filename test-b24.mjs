@@ -206,7 +206,14 @@ async function main() {
         r.status === 200 && typeof j.file_path === 'string' && j.file_path.startsWith('/uploads/comics/'),
         `status ${r.status} ${JSON.stringify(j)}`);
       uploadPath = j.file_path || null;
-      if (uploadPath) uploadedDir = path.join(PUBLIC_ROOT, uploadPath.split('/').slice(0, 3).join(path.sep));
+      // file_path = /uploads/{kind}/{uuid}/{name} — slice(0,4) keeps the UUID
+      // segment so the cleanup deletes ONLY this test's own upload dir
+      // (public/uploads/comics/<uuid>). GOTCHA (2026-10-01, second wipe):
+      // slice(0,3) resolved to public/uploads/comics — the ENTIRE kind dir —
+      // and the end-of-test rmSync then deleted every comic page on disk
+      // (user content + other sessions' uploads). C9: a test may only delete
+      // uploads IT created.
+      if (uploadPath) uploadedDir = path.join(PUBLIC_ROOT, uploadPath.split('/').slice(0, 4).join(path.sep));
 
       // the file must be GET-able at exactly that URL (express.static('public'))
       const g = await fetch(base + uploadPath, CLOSE);

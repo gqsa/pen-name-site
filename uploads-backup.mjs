@@ -3,11 +3,16 @@
 // WHY: public/uploads is gitignored and treated as regenerable (C3 — Render's
 // free-tier disk is wiped on every deploy, and the .gitignore note says "re-upload
 // test content each time"). On 2026-10-01 the comics folder was wiped from this
-// checkout anyway (56 of 68 comic pages lost; the app code never deletes uploads —
-// server.js has no rmSync call, test-b24.mjs only removes ITS OWN uuid dir — and
-// the originals survived in the user's D:\Downloads, where 56 were recovered; the
-// 11 unrecoverable were test/seed artifacts only). This keeps a workspace-local
-// mirror so any future wipe is a one-command restore, not data loss.
+// checkout TWICE (56 of 67 comic pages lost the first time; the originals survived
+// in the user's D:\Downloads, where 56 were recovered; the 11 unrecoverable were
+// test/seed artifacts only). ROOT CAUSE of both wipes (found + fixed 2026-10-01):
+// test-b24.mjs L209 computed its cleanup dir from file_path.split('/').slice(0,3)
+// on /uploads/{kind}/{uuid}/{name} — that is public/uploads/comics, the WHOLE
+// kind dir (the UUID segment was dropped), so the end-of-test rmSync deleted
+// every comic page on disk. Fixed to slice(0,4) (the test's own uuid dir) and
+// verified. The app code itself never deletes uploads (server.js has no rmSync).
+// This keeps a workspace-local mirror so any future wipe is a one-command
+// restore, not data loss.
 //
 //   node uploads-backup.mjs backup     # public/uploads -> uploads-backup (merge copy)
 //   node uploads-backup.mjs restore    # uploads-backup -> public/uploads (merge copy)
