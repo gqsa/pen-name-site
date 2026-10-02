@@ -68,8 +68,11 @@ import { useEffect, useState } from 'react'
 // Restore button), and Restore brings it back. STATE-ONLY — no endpoints.
 // The grips + body stay MOUNTED the whole time (CSS hides them while
 // minimized), so the editor's drafts / selection / zoom survive the
-// round-trip untouched. The state is session-only (a reload starts
-// expanded) and the height deltas are preserved across the round-trip.
+// round-trip untouched. The minimise state PERSISTS across reloads the
+// same way the height does (localStorage `gqsa.sectionMinimized.<key>`,
+// written on every minimise/restore — the user comes back to the same
+// decluttered view); without a storageKey it stays session state. The
+// height deltas are preserved across the round-trip.
 
 const MIN_H = 480         // px — the total-height lower clamp
 const MAX_H = 1400        // px — the total-height upper clamp
@@ -77,6 +80,7 @@ const DEFAULT_H = 720     // px — the base height
 
 const heightKey = k => 'gqsa.sectionHeight.' + k
 const legacyPullKey = k => 'gqsa.sectionTopPull.' + k   // 1st revision — cleared below
+const minimizedKey = k => 'gqsa.sectionMinimized.' + k  // B2.8 — persisted minimise state
 
 // Step 11.5a — read the stored deltas; returns {t, b}. Every access is
 // try/catch'd: a blocked or unavailable storage (private mode, quota)
@@ -105,6 +109,17 @@ export function readStoredDeltas(storageKey, baseHeight, lo, hi) {
 
 function writeStored(storageKey, deltas) {
   try { window.localStorage.setItem(heightKey(storageKey), JSON.stringify(deltas)) } catch { /* session-only */ }
+}
+
+// B2.8 — the persisted minimise flag ('1' minimised / '0' expanded). Blocked
+// or unavailable storage degrades to the expanded default (session state) —
+// the section still works, it only forgets on reload, exactly like the
+// height-delta fallback.
+function readStoredMinimized(storageKey) {
+  try { return window.localStorage.getItem(minimizedKey(storageKey)) === '1' } catch { return false }
+}
+function writeMinimized(storageKey, on) {
+  try { window.localStorage.setItem(minimizedKey(storageKey), on ? '1' : '0') } catch { /* session-only */ }
 }
 
 function clearStored(storageKey, keyFn) {
@@ -145,10 +160,18 @@ export default function ResizableSection({
     storageKey != null ? readStoredDeltas(storageKey, initialHeight, minHeight, maxHeight).t : 0,
   )
 
-  // B2.8 — the minimise state. Session-only (no persistence, no endpoints);
-  // the deltas above are untouched by it, so a Restore returns the section
-  // to exactly the height it had before the minimise.
-  const [minimized, setMinimized] = useState(false)
+  // B2.8 — the minimise state. Persisted like the height (the user comes
+  // back to the same decluttered view on reload) when a storageKey is
+  // given; without one it's session state. The deltas above are untouched
+  // by it, so a Restore returns the section to exactly the height it had
+  // before the minimise.
+  const [minimized, setMinimized] = useState(() =>
+    storageKey != null ? readStoredMinimized(storageKey) : false,
+  )
+  const setMinimizedBoth = (on) => {
+    setMinimized(on)
+    if (storageKey != null) writeMinimized(storageKey, on)
+  }
 
   // One-shot cleanup: the FIRST revision stored a `pull` (a translateY that
   // painted over the section above). The model no longer has one — drop the
@@ -265,7 +288,7 @@ export default function ResizableSection({
           <button
             type="button"
             className="section-minbar-restore"
-            onClick={() => setMinimized(false)}
+            onClick={() => setMinimizedBoth(false)}
             aria-label={'Restore ' + title}
           >
             + Restore
@@ -297,7 +320,7 @@ export default function ResizableSection({
         <button
           type="button"
           className="section-minimise"
-          onClick={() => setMinimized(true)}
+          onClick={() => setMinimizedBoth(true)}
           aria-label={'Minimise ' + title}
           title={'Minimise ' + title}
         >
