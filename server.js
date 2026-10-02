@@ -433,6 +433,65 @@ for (const [table, col, type] of [
   if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
 }
 
+// B18 — the caption model + theme colour. Two plain column adds (the same
+// PRAGMA-guarded pattern as above):
+//   • comic_pages.caption_position TEXT — WHERE a page's caption sits:
+//     'top' (the round-1 default — caption ABOVE the image), 'bottom'
+//     (caption BELOW), or 'page' (a caption-ONLY page — no image at all).
+//     DEFAULT 'top' so pre-existing pages read back as the round-1 layout.
+//   • comics.theme_colour TEXT (nullable) — the per-comic caption background
+//     (B2.5 Step 15, folded in; the B8 reader renders it too).
+{
+  const cpCols = db.prepare('PRAGMA table_info(comic_pages)').all().map(r => r.name);
+  if (!cpCols.includes('caption_position'))
+    db.exec(`ALTER TABLE comic_pages ADD COLUMN caption_position TEXT DEFAULT 'top'`);
+  const cCols = db.prepare('PRAGMA table_info(comics)').all().map(r => r.name);
+  if (!cCols.includes('theme_colour'))
+    db.exec(`ALTER TABLE comics ADD COLUMN theme_colour TEXT`);
+}
+
+// B18 — comic_pages.file_path must become NULLABLE (a caption-only page has no
+// image). SQLite can't drop NOT NULL via ALTER, so this is a TABLE-REBUILD
+// migration: create-new / copy / drop / rename. It runs ONCE and is
+// idempotent — it only fires while file_path is still NOT NULL, so a restart
+// on an already-migrated DB is a no-op (the guard reads PRAGMA table_info).
+// The rebuild is one transaction (a failure rolls back — no half state) and
+// foreign_keys is OFF across the drop/rename (that pragma can only be toggled
+// OUTSIDE a transaction, and the old table's CASCADE FK must not fire mid-copy).
+// The new table keeps the EXACT column set + constraints (id PK, the CASCADE
+// FK, UNIQUE(comic_id,page_number)) — only file_path loses its NOT NULL.
+{
+  const cols = db.prepare('PRAGMA table_info(comic_pages)').all();
+  const fp = cols.find(c => c.name === 'file_path');
+  const expected = ['id', 'comic_id', 'page_number', 'file_path', 'caption', 'caption_position'];
+  if (fp && fp.notnull === 1 && expected.every(n => cols.some(c => c.name === n))) {
+    db.exec('PRAGMA foreign_keys=OFF');
+    try {
+      db.exec('BEGIN');
+      db.exec(`
+        CREATE TABLE comic_pages_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          comic_id INTEGER NOT NULL REFERENCES comics(id) ON DELETE CASCADE,
+          page_number INTEGER NOT NULL,
+          file_path TEXT,                          -- B18: nullable (caption-only pages)
+          caption TEXT,
+          caption_position TEXT,
+          UNIQUE (comic_id, page_number)
+        )`);
+      db.exec(`INSERT INTO comic_pages_new (id, comic_id, page_number, file_path, caption, caption_position)
+               SELECT id, comic_id, page_number, file_path, caption, caption_position FROM comic_pages`);
+      db.exec('DROP TABLE comic_pages');
+      db.exec('ALTER TABLE comic_pages_new RENAME TO comic_pages');
+      db.exec('COMMIT');
+      console.log('[B18] migrated comic_pages.file_path → nullable (table rebuild)');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+    db.exec('PRAGMA foreign_keys=ON');
+  }
+}
+
 // B1 seed: one tier + a little sample content, ONLY while a table is empty
 // (so a restart never duplicates it). Real content arrives via the admin
 // upload routes (B2.4); these rows give the schema something real to hold
@@ -1286,12 +1345,32 @@ app.delete('/api/admin/stories/:id', (req, res) => {
 app.post('/api/admin/comics', async (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
   try {
-    const { title, description, publish_date, is_member, tier_id } = await readJsonBody(req);
+    const { title, description, publish_date, is_member, tier_id, theme_colour } = await readJsonBody(req);
     if (!title) return res.status(400).json({ error: 'title required' });
     const now = Date.now();
-    const r = db.prepare('INSERT INTO comics (title, description, publish_date, is_member, tier_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?)')
-      .run(String(title), description ?? null, publish_date ?? now, is_member ? 1 : 0, tier_id ?? null, now, now);
+    const r = db.prepare('INSERT INTO comics (title, description, publish_date, is_member, tier_id, theme_colour, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)')
+      .run(String(title), description ?? null, publish_date ?? now, is_member ? 1 : 0, tier_id ?? null, theme_colour ?? null, now, now);
     res.status(201).json({ success: true, id: Number(r.lastInsertRowid) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// B18: the missing comics UPDATE (there was no PUT until now). Partial-update
+// semantics copied from PUT /api/admin/stories/:id — a field ABSENT from the
+// payload keeps the row's current value; theme_colour CAN be explicitly
+// cleared with null (the `=== undefined` check, same as tier_id).
+app.put('/api/admin/comics/:id', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  const id = Number(req.params.id);
+  const row = db.prepare('SELECT * FROM comics WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  try {
+    const b = await readJsonBody(req);
+    db.prepare('UPDATE comics SET title=?, description=?, publish_date=?, is_member=?, tier_id=?, theme_colour=?, updated_at=? WHERE id=?')
+      .run(b.title ?? row.title, b.description ?? row.description, b.publish_date ?? row.publish_date,
+           (b.is_member ?? row.is_member) ? 1 : 0,
+           b.tier_id === undefined ? row.tier_id : b.tier_id,
+           b.theme_colour === undefined ? row.theme_colour : b.theme_colour, Date.now(), id);
+    res.json({ success: true, id });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
@@ -1305,13 +1384,27 @@ app.delete('/api/admin/comics/:id', (req, res) => {
 app.post('/api/admin/comic-pages', async (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
   try {
-    const { comic_id, page_number, file_path, caption } = await readJsonBody(req);
-    if (!comic_id || !Number.isInteger(page_number) || page_number < 1 || !file_path)
-      return res.status(400).json({ error: 'comic_id + integer page_number (>= 1) + file_path required' });
+    const { comic_id, page_number, file_path, caption, caption_position } = await readJsonBody(req);
+    // B18 — caption_position: 'top' (default, round-1 layout) | 'bottom' |
+    // 'page' (a caption-only page — no image). Unknown values fall back to the
+    // default instead of 400ing (a lenient reader, like the existing routes).
+    const pos = ['top', 'bottom', 'page'].includes(caption_position) ? caption_position : 'top';
+    if (!comic_id || !Number.isInteger(page_number) || page_number < 1)
+      return res.status(400).json({ error: 'comic_id + integer page_number (>= 1) required' });
     if (!db.prepare('SELECT id FROM comics WHERE id = ?').get(Number(comic_id)))
       return res.status(404).json({ error: 'Comic not found' });
-    const r = db.prepare('INSERT INTO comic_pages (comic_id, page_number, file_path, caption) VALUES (?,?,?,?)')
-      .run(Number(comic_id), page_number, String(file_path), caption ?? null);
+    // B18 — the two row shapes: an IMAGE page needs file_path; a 'page' row
+    // (caption-only) stores no file. A caption may start blank on a 'page' row
+    // (the editor's "insert caption page, then type" flow) — the content field
+    // is the caption, not a hard NOT NULL.
+    if (pos === 'page') {
+      if (file_path)
+        return res.status(400).json({ error: 'A caption-only page (position "page") takes no file_path' });
+    } else if (!file_path) {
+      return res.status(400).json({ error: 'comic_id + integer page_number (>= 1) + file_path required (or position "page" for a caption-only page)' });
+    }
+    const r = db.prepare('INSERT INTO comic_pages (comic_id, page_number, file_path, caption, caption_position) VALUES (?,?,?,?,?)')
+      .run(Number(comic_id), page_number, pos === 'page' ? null : String(file_path), caption ?? null, pos);
     res.status(201).json({ success: true, id: Number(r.lastInsertRowid) });
   } catch (e) {
     if (/UNIQUE constraint failed/.test(e.message))
@@ -1327,11 +1420,19 @@ app.patch('/api/admin/comic-pages/:id', async (req, res) => {
   if (!row) return res.status(404).json({ error: 'Not found' });
   try {
     const b = await readJsonBody(req);
-    db.prepare('UPDATE comic_pages SET page_number=?, caption=?, file_path=? WHERE id=?')
+    // B18 — caption_position ('top' | 'bottom' | 'page'): ABSENT or an explicit
+    // null keeps the row's current position; a valid value sets it; an UNKNOWN
+    // value falls back to the current position (lenient — like this route's
+    // other fields, rather than 400ing the way the editor never would).
+    const pos = (b.caption_position === undefined || b.caption_position === null)
+      ? (row.caption_position ?? 'top')
+      : (['top', 'bottom', 'page'].includes(b.caption_position) ? b.caption_position : (row.caption_position ?? 'top'));
+    db.prepare('UPDATE comic_pages SET page_number=?, caption=?, file_path=?, caption_position=? WHERE id=?')
       .run(b.page_number ?? row.page_number,
            b.caption === undefined ? row.caption : b.caption, // explicit null CLEARS the caption
-           b.file_path ?? row.file_path, id);
-    res.json({ success: true, id });
+           b.file_path ?? row.file_path,
+           pos, id);
+    res.json({ success: true, id, caption_position: pos });
   } catch (e) {
     if (/UNIQUE constraint failed/.test(e.message))
       return res.status(409).json({ error: 'A page with that number already exists for this comic' });

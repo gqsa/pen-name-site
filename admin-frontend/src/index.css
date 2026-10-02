@@ -278,6 +278,86 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 .preview-figure { position: relative; width: fit-content; margin: 0 auto 20px; }
 .preview-thumb { display: block; max-width: 100%; max-height: 420px; width: auto; height: auto; object-fit: contain; background: #000; border-radius: 4px; }
 
+/* ================================================================ B18 =====
+   The caption POSITION model ('top' | 'bottom' | 'page') + caption-only pages
+   + the per-comic theme colour. The JSX orders the caption node and the
+   image node by position (top → caption first, bottom → image first, page →
+   caption alone); here we style the NEW parts. The theme colour itself is
+   applied INLINE (background + a legible text colour via legibleTextOn) so
+   it can never be overridden by these rules. */
+
+/* The four "+" affordances around the ACTIVE preview figure — small circular
+   buttons at the four edge midpoints (half overhanging the figure). Up/Down =
+   attach the caption above/below the image (image pages only); Left/Right =
+   insert a caption-only page before/after. A primary action, so always
+   visible on the active page (not a hover-reveal like the trash bin). */
+.cap-plus {
+  position: absolute;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; margin: 0;
+  border: 1px solid var(--accent); border-radius: 50%;
+  background: var(--card); color: var(--accent);
+  font-size: 15px; line-height: 1; font-weight: 700;
+  cursor: pointer; z-index: 5;
+  transition: background .12s ease, color .12s ease;
+}
+.cap-plus:hover:not(:disabled) { background: var(--accent); color: #fff; }
+.cap-plus:disabled { opacity: .4; cursor: default; }
+.cap-plus--top    { top: -11px;    left: 50%;  transform: translateX(-50%); }
+.cap-plus--bottom { bottom: -11px; left: 50%;  transform: translateX(-50%); }
+.cap-plus--left   { left: -11px;   top: 50%;   transform: translateY(-50%); }
+.cap-plus--right  { right: -11px;  top: 50%;   transform: translateY(-50%); }
+
+/* A caption-only figure has no image, so fit-content would collapse to the
+   text — give it a readable width so the caption box has room to breathe. */
+.preview-figure--caption { min-width: 280px; max-width: 100%; }
+
+/* A caption page (position 'page'): a larger, centred box for the caption
+   (a textarea — it is a full PAGE of text), with a "Merge" action that folds
+   the text back into the nearest image page (the reversible B18 step). */
+.caption-page-box { text-align: center; }
+.caption-page-input {
+  width: 100%; min-height: 84px;
+  padding: 12px 14px; font-size: 1rem; line-height: 1.5;
+  text-align: center; resize: vertical;
+}
+.caption-page-actions { display: flex; justify-content: center; margin-top: 8px; }
+.cap-merge {
+  padding: 4px 14px; font-size: 12px; font-weight: 600;
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 999px; cursor: pointer;
+}
+.cap-merge:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.cap-merge:disabled { opacity: .45; cursor: default; }
+/* A non-active caption page shows its text as a centred, wrapped figcaption. */
+.caption-page-caption { text-align: center; white-space: pre-wrap; }
+
+/* A caption-only TILE (grid / fill zoom regimes): there is no <img>, so a
+   centred placeholder over the tile's usual black background + label. */
+.page-tile-caption {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 600; color: var(--muted);
+  text-align: center; padding: 8px;
+}
+
+/* The theme-colour control (left pane): a compact swatch + a "Clear" pill.
+   The global `input` rule would make the swatch a full-width block, so
+   constrain it here. */
+.theme-row { align-items: center; }
+.theme-label { flex: 0 0 auto; margin: 0; font-size: .9rem; }
+.theme-input {
+  flex: 0 0 auto; width: 44px; height: 30px; padding: 2px; margin: 0;
+  cursor: pointer; background: transparent;
+}
+.theme-clear {
+  flex: 0 0 auto; padding: 3px 12px; font-size: 12px; font-weight: 600;
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 999px; cursor: pointer;
+}
+.theme-clear:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.theme-clear:disabled { opacity: .45; cursor: default; }
+
 /* Step 2 — the live dropzone (drag / paste / double-click picker).
    Base shape from the Step-1 stub; the states below make the three input
    paths legible: hover hints "clickable", --active = a drag is over it,

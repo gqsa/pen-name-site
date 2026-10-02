@@ -22,11 +22,15 @@
 //       caption set → DELETE a page (B2.5 Step 12: renumbers to clean 1..N)
 //       → DELETE comic → CASCADE (0 pages left) → DELETE middle of a 5-page
 //       comic → clean 1-4, last page → 1-3, bogus id → 404;
+//       B18: theme_colour set/clear/keep via POST+PUT, caption_position
+//       defaults to 'top', caption-only ('page') row has NULL file_path, the
+//       two POST 400s, position flip + keep-on-omit;
 //       non-admin 403 on the write routes
 //   5.  images + videos: POST/PUT(caption)/DELETE each; non-admin 403
 //   6.  schema: caption on comic_pages + images + videos; updated_at INTEGER
 //       on images + videos (the Step 6 type fix — not the TEXT affinity a
-//       bare ADD COLUMN would have given)
+//       bare ADD COLUMN would have given); B18: caption_position on
+//       comic_pages + theme_colour on comics
 //
 // NOTE on 403 shapes (A1/Step-1 house note): the admin gate answers JSON
 // {"error":"Not admin"}; the CSRF middleware (POST-only, fires BEFORE the
@@ -403,6 +407,112 @@ async function main() {
       check('4t. cleanup: DELETE the 5-page comic → 200', r5.status === 200, `status ${r5.status}`);
       await r5.text();
 
+      // ---- B18: the caption POSITION model + caption-only pages + the
+      // per-comic theme colour (its own comic, deleted at the end → the run
+      // still leaves the DB exactly as it found it). ----
+      {
+        r5 = await fetch(base + '/api/admin/comics', {
+          method: 'POST', headers: adminH,
+          body: JSON.stringify({ title: `B24 b18 comic ${ts}`, theme_colour: '#ff0000' }),
+        });
+        const jb = await r5.json().catch(() => ({}));
+        const b18Id = jb.id;
+        check('4u. POST comic WITH theme_colour → 201 + the colour persists',
+          r5.status === 201 && (await content()).body.comics.find(x => x.id === b18Id)?.theme_colour === '#ff0000',
+          `status ${r5.status}`);
+
+        // An IMAGE page: caption_position must default to 'top'.
+        r5 = await fetch(base + '/api/admin/comic-pages', {
+          method: 'POST', headers: adminH,
+          body: JSON.stringify({ comic_id: b18Id, page_number: 1, file_path: `/uploads/comics/${ts}/b18.png` }),
+        });
+        const b18img = (await content()).body.pages.find(x => x.comic_id === b18Id);
+        check('4v. POST image page → 201, caption_position defaults to "top"',
+          r5.status === 201 && b18img && b18img.caption_position === 'top',
+          `status ${r5.status} ${JSON.stringify(b18img)}`);
+
+        // A CAPTION-ONLY page (position 'page', NO file_path).
+        r5 = await fetch(base + '/api/admin/comic-pages', {
+          method: 'POST', headers: adminH,
+          body: JSON.stringify({ comic_id: b18Id, page_number: 2, caption_position: 'page', caption: 'standalone' }),
+        });
+        check('4w. POST caption-only page (position "page") → 201', r5.status === 201, `status ${r5.status}`);
+        let b18mine = (await content()).body.pages.filter(x => x.comic_id === b18Id).sort((a, b) => a.page_number - b.page_number);
+        const b18cap = b18mine.find(x => x.caption_position === 'page');
+        check('4x. caption-only page persisted: file_path NULL, caption kept, its own row',
+          b18cap && b18cap.file_path === null && b18cap.caption === 'standalone' && b18mine.length === 2,
+          JSON.stringify(b18mine));
+
+        // The two 400s: 'page' WITH a file_path; top/bottom WITHOUT one.
+        r5 = await fetch(base + '/api/admin/comic-pages', {
+          method: 'POST', headers: adminH,
+          body: JSON.stringify({ comic_id: b18Id, page_number: 3, caption_position: 'page', file_path: '/x.png' }),
+        });
+        let t5 = await r5.text();
+        check('4y. POST "page" WITH file_path → 400', r5.status === 400 && /no file_path/i.test(t5), `got ${r5.status} ${t5}`);
+        r5 = await fetch(base + '/api/admin/comic-pages', {
+          method: 'POST', headers: adminH,
+          body: JSON.stringify({ comic_id: b18Id, page_number: 3, caption_position: 'bottom' }),
+        });
+        t5 = await r5.text();
+        check('4z. POST top/bottom WITHOUT file_path → 400', r5.status === 400, `got ${r5.status} ${t5}`);
+
+        // Flip the image page's position top → bottom → top.
+        r5 = await fetch(base + `/api/admin/comic-pages/${b18img.id}`, {
+          method: 'PATCH', headers: adminH, body: JSON.stringify({ caption_position: 'bottom' }),
+        });
+        check('4aa. PATCH caption_position → "bottom" → 200', r5.status === 200, `status ${r5.status}`);
+        await r5.text();
+        check('4ab. the position persisted as "bottom"',
+          (await content()).body.pages.find(x => x.id === b18img.id)?.caption_position === 'bottom');
+        r5 = await fetch(base + `/api/admin/comic-pages/${b18img.id}`, {
+          method: 'PATCH', headers: adminH, body: JSON.stringify({ caption_position: 'top' }),
+        });
+        await r5.text();
+        check('4ac. flipped back to "top"',
+          (await content()).body.pages.find(x => x.id === b18img.id)?.caption_position === 'top');
+
+        // A PATCH that OMITS caption_position keeps the current one.
+        r5 = await fetch(base + `/api/admin/comic-pages/${b18img.id}`, {
+          method: 'PATCH', headers: adminH, body: JSON.stringify({ caption: 'kept' }),
+        });
+        await r5.text();
+        check('4ad. PATCH caption (no position) keeps "top" + sets the caption',
+          (await content()).body.pages.find(x => x.id === b18img.id)?.caption_position === 'top' &&
+          (await content()).body.pages.find(x => x.id === b18img.id)?.caption === 'kept');
+
+        // Theme colour: update it, then CLEAR it (explicit null), then confirm
+        // an OMITTED field keeps its value (PUT is a partial update).
+        r5 = await fetch(base + `/api/admin/comics/${b18Id}`, {
+          method: 'PUT', headers: adminH, body: JSON.stringify({ theme_colour: '#00ff00' }),
+        });
+        check('4ae. PUT theme_colour → 200', r5.status === 200, `status ${r5.status}`);
+        await r5.text();
+        check('4af. the colour updated to #00ff00',
+          (await content()).body.comics.find(x => x.id === b18Id)?.theme_colour === '#00ff00');
+        r5 = await fetch(base + `/api/admin/comics/${b18Id}`, {
+          method: 'PUT', headers: adminH, body: JSON.stringify({ theme_colour: null }),
+        });
+        await r5.text();
+        check('4ag. PUT theme_colour: null CLEARS it (back to NULL)',
+          (await content()).body.comics.find(x => x.id === b18Id)?.theme_colour === null);
+        r5 = await fetch(base + `/api/admin/comics/${b18Id}`, {
+          method: 'PUT', headers: adminH, body: JSON.stringify({ title: `B24 b18 comic ${ts} (renamed)` }),
+        });
+        await r5.text();
+        check('4ah. PUT without theme_colour keeps the value + updates the title',
+          (await content()).body.comics.find(x => x.id === b18Id)?.theme_colour === null &&
+          (await content()).body.comics.find(x => x.id === b18Id)?.title === `B24 b18 comic ${ts} (renamed)`);
+
+        // Cleanup — the B18 comic (cascades its two pages). Net DB change: zero.
+        r5 = await fetch(base + `/api/admin/comics/${b18Id}`, { method: 'DELETE', headers: adminGet });
+        check('4ai. cleanup: DELETE the B18 comic → 200', r5.status === 200, `status ${r5.status}`);
+        await r5.text();
+        check('4aj. the B18 comic + its pages are gone (net-zero)',
+          !(await content()).body.comics.find(x => x.id === b18Id) &&
+          (await content()).body.pages.filter(x => x.comic_id === b18Id).length === 0);
+      }
+
       // non-admin → 403 on the write routes (POST with the user's own token)
       let r2 = await fetch(base + '/api/admin/comics', {
         method: 'POST', headers: userCSRF, body: JSON.stringify({ title: 'x' }),
@@ -495,6 +605,7 @@ async function main() {
     {
       const cols = (t) => jsonBody(`PRAGMA table_info(${t})`).map(r => `${r.name}:${r.type}`);
       const cp = cols('comic_pages');
+      const cm = cols('comics');
       const im = cols('images');
       const vi = cols('videos');
       check('6a. schema: comic_pages has caption (Step 2)', cp.includes('caption:TEXT'), cp.join(', '));
@@ -502,6 +613,9 @@ async function main() {
         im.includes('caption:TEXT') && im.includes('updated_at:INTEGER'), im.join(', '));
       check('6c. schema: videos has caption + updated_at INTEGER (Step 2 + Step 6)',
         vi.includes('caption:TEXT') && vi.includes('updated_at:INTEGER'), vi.join(', '));
+      // B18 — the caption position model + the per-comic theme colour.
+      check('6d. schema: comic_pages has caption_position (B18)', cp.includes('caption_position:TEXT'), cp.join(', '));
+      check('6e. schema: comics has theme_colour (B18)', cm.includes('theme_colour:TEXT'), cm.join(', '));
     }
   } finally {
     try { s.child.kill(); } catch { /* already gone */ }
