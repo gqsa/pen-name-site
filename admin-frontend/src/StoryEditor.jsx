@@ -293,6 +293,8 @@ export default function StoryEditor({ csrfToken }) {
       storageKey="storyEditor"
       initialHeight={880}
       minHeight={620}
+      // B2.8 — the minimise affordance (title shown on the collapsed bar).
+      title="Story editor"
     >
       <h2>Story editor</h2>
       <p className="muted">

@@ -1587,6 +1587,8 @@ export default function ComicEditor({
     <ResizableSection
       className={'comic-editor' + (dragActive ? ' comic-editor--file-drag' : '')}
       storageKey="comicEditor"
+      // B2.8 — the minimise affordance (title shown on the collapsed bar).
+      title="Comic editor"
       // Step 13 — the section is the file-drop catch-all (a file dropped
       // anywhere in it appends at the end). The drop zone stays the bright
       // anchor (dragActive lights both the section ring and .dropzone--active).

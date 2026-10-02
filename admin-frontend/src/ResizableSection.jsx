@@ -61,6 +61,15 @@ import { useEffect, useState } from 'react'
 //
 // Reset: double-click EITHER grip → both deltas back to 0 (the stored value
 // dropped too, so a stale one can't re-apply on the next load).
+//
+// B2.8 (editor sections minimisable) — when a `title` prop is given, the
+// section grows the minimise affordance: a small "−" button (top-right
+// corner) collapses the section to a 48px header bar (the title + a
+// Restore button), and Restore brings it back. STATE-ONLY — no endpoints.
+// The grips + body stay MOUNTED the whole time (CSS hides them while
+// minimized), so the editor's drafts / selection / zoom survive the
+// round-trip untouched. The state is session-only (a reload starts
+// expanded) and the height deltas are preserved across the round-trip.
 
 const MIN_H = 480         // px — the total-height lower clamp
 const MAX_H = 1400        // px — the total-height upper clamp
@@ -108,6 +117,10 @@ export default function ResizableSection({
   minHeight = MIN_H,
   maxHeight = MAX_H,
   storageKey = null,
+  // B2.8 — the section's name (e.g. 'Comic editor'). When given, the section
+  // gets the minimise affordance (the "−" button → the title + Restore bar).
+  // Without it the section renders exactly as before (no button, no bar).
+  title = null,
   // Generic drag pass-through: any section can opt into being a drop target
   // by forwarding these to the <section> below. The comic editor uses them
   // for Step 13's section-level file drop (a file dropped ANYWHERE in the
@@ -131,6 +144,11 @@ export default function ResizableSection({
   const [top, setTop] = useState(() =>
     storageKey != null ? readStoredDeltas(storageKey, initialHeight, minHeight, maxHeight).t : 0,
   )
+
+  // B2.8 — the minimise state. Session-only (no persistence, no endpoints);
+  // the deltas above are untouched by it, so a Restore returns the section
+  // to exactly the height it had before the minimise.
+  const [minimized, setMinimized] = useState(false)
 
   // One-shot cleanup: the FIRST revision stored a `pull` (a translateY that
   // painted over the section above). The model no longer has one — drop the
@@ -226,12 +244,34 @@ export default function ResizableSection({
 
   return (
     <section
-      className={('resizable-section ' + className).trim()}
-      style={{ height: height + 'px' }}
+      className={(
+        'resizable-section'
+        + (minimized ? ' resizable-section--minimized' : '')
+        + (className ? ' ' + className : '')
+      ).trim()}
+      // B2.8 — while minimized the inline height is dropped and the CSS
+      // `.resizable-section--minimized` height (48px header bar) takes over.
+      style={minimized ? undefined : { height: height + 'px' }}
       onDragOver={onDragOver}
       onDrop={onDrop}
       onDragLeave={onDragLeave}
     >
+      {/* B2.8 — the minimise header bar. Static chrome, hidden while
+          expanded; the body below stays MOUNTED in BOTH states (that is
+          what keeps the editor's drafts / selection / zoom intact). */}
+      {title != null && (
+        <div className="section-minbar">
+          <span className="section-minbar-title">{title}</span>
+          <button
+            type="button"
+            className="section-minbar-restore"
+            onClick={() => setMinimized(false)}
+            aria-label={'Restore ' + title}
+          >
+            + Restore
+          </button>
+        </div>
+      )}
       <div
         className="resizable-grip resizable-grip--top"
         onPointerDown={e => startResize(e, 'top')}
@@ -251,6 +291,19 @@ export default function ResizableSection({
         title="Drag up/down to move this section's bottom edge (double-click to reset)"
         aria-label="Resize section (bottom edge)"
       />
+      {/* B2.8 — the minimise button (visible only while expanded; a static
+          sibling of the grips, so a click never starts a grip drag). */}
+      {title != null && !minimized && (
+        <button
+          type="button"
+          className="section-minimise"
+          onClick={() => setMinimized(true)}
+          aria-label={'Minimise ' + title}
+          title={'Minimise ' + title}
+        >
+          −
+        </button>
+      )}
     </section>
   )
 }

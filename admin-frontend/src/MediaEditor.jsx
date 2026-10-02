@@ -512,6 +512,8 @@ export default function MediaEditor({ csrfToken }) {
       storageKey="mediaEditor"
       initialHeight={880}
       minHeight={620}
+      // B2.8 — the minimise affordance (title shown on the collapsed bar).
+      title="Media editor"
       onDragOver={onSectionDragOver}
       onDrop={onSectionDrop}
       onDragLeave={onSectionDragLeave}

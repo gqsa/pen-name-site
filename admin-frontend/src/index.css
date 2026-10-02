@@ -49,7 +49,7 @@ button:disabled { opacity: .55; cursor: default; }
    is a flex column: the body fills (min-height: 0 lets its flex children
    shrink and scroll internally) and a grip strip sits on the bottom edge
    (cursor: ns-resize; the pointer-drag + clamping live in the component). */
-.resizable-section { display: flex; flex-direction: column; }
+.resizable-section { display: flex; flex-direction: column; position: relative; } /* position: relative — B2.8's minimise button anchors to the section */
 .resizable-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .resizable-grip { flex: 0 0 16px; margin-top: 4px; display: flex; align-items: center; justify-content: center; cursor: ns-resize; border-radius: 4px; }
 .resizable-grip::before { content: ""; width: 48px; height: 4px; border-radius: 2px; background: var(--line); }
@@ -62,6 +62,34 @@ button:disabled { opacity: .55; cursor: default; }
    suppress text selection (dragging over the body would otherwise grab
    text / start a native drag). */
 body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select: none; }
+
+/* B2.8 — editor sections minimisable: the "−" button (top-right corner)
+   collapses the section to a 48px header bar (title + Restore); Restore
+   brings it back. STATE-ONLY (no endpoints) and state-INTACT: the grips +
+   body stay MOUNTED (display:none) so the editor's drafts / selection /
+   zoom survive the round-trip, and the height deltas are untouched. */
+.section-minimise {
+  position: absolute; top: 0; right: 10px; z-index: 1;
+  width: 24px; height: 24px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: var(--card); color: var(--muted);
+  font-size: 15px; line-height: 1; cursor: pointer;
+}
+.section-minimise:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.section-minbar { display: none; width: 100%; height: 48px; align-items: center; justify-content: space-between; gap: 12px; }
+.section-minbar-title { font-size: 15px; font-weight: 700; color: var(--ink); }
+.section-minbar-restore {
+  padding: 5px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: transparent; color: var(--muted);
+}
+.section-minbar-restore:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.resizable-section--minimized { height: 48px; }
+.resizable-section--minimized .section-minbar { display: flex; }
+/* The body + grips are HIDDEN, not unmounted — the editor's state lives on. */
+.resizable-section--minimized .resizable-grip,
+.resizable-section--minimized .resizable-body { display: none; }
 
 /* B2.5 — the comic editor: a wider split-view container than the 780px `.wrap`
    (the editor renders as a sibling of `.wrap`, so it isn't clamped to 780px).
