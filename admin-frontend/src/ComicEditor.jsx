@@ -394,6 +394,12 @@ export default function ComicEditor({
   const captionTimers = useRef({})                       // page id → pending debounce timeout (per page, so one page's timer can't clobber another's)
   const [captionSave, setCaptionSave] = useState(null)   // null | 'saving' | 'saved' | 'error'
   const [captionError, setCaptionError] = useState(null) // the message behind an 'error' status
+  // B18 round 2 — the page whose caption is being EDITED right now (the
+  // inline input shows in place of the read-only bar). No default box: the
+  // bar exists only where the owner put one — clicking a bar (or the
+  // top/bottom '+' on a captionless page) arms this page; blurring an empty
+  // one disarms it and the bar disappears again.
+  const [captionEditId, setCaptionEditId] = useState(null)
 
   // Step 7 — active page + the preview window.
   // activePageId is a PAGE id (a number). `selectedId` stays the COMIC — the
@@ -1279,7 +1285,7 @@ export default function ComicEditor({
   // reports the error.
 
   const saveCaption = useCallback(async (pageId, value) => {
-    const next = value.trim() === '' ? null : value
+    const next = (value == null || String(value).trim() === '') ? null : value
     setCaptionSave('saving')
     setCaptionError(null)
     try {
@@ -1293,9 +1299,11 @@ export default function ComicEditor({
         throw new Error(data.error || `save caption answered ${res.status}`)
       }
       setCaptionSave('saved')
+      return true
     } catch (err) {
       setCaptionSave('error')
       setCaptionError(err.message)
+      return false
     }
   }, [csrfToken])
 
@@ -1422,18 +1430,35 @@ export default function ComicEditor({
     }
   }, [pages, csrfToken])
 
+  // B18 round 2, substep 4 — the hover BIN on a caption bar: delete the
+  // caption (clear the text → the bar disappears). Flushes that page's
+  // pending debounce first, clears the text optimistically, then PATCHes
+  // null (an explicit null CLEARS the server value).
+  const deleteCaption = useCallback(async (pageId) => {
+    if (!selectedPages.some(x => x.id === pageId)) return
+    const timers = captionTimers.current
+    if (timers[pageId]) { clearTimeout(timers[pageId]); delete timers[pageId] }
+    setPages(prev => prev.map(x => (x.id === pageId ? { ...x, caption: null } : x)))
+    setCaptionEditId(null)
+    await saveCaption(pageId, null)
+  }, [selectedPages, saveCaption, setPages, setCaptionEditId])
+
   // "Left/Right +" around the active preview page: insert a BLANK
   // caption-only page before/after it. Flow: POST the row (no file_path),
   // then persist the NEW ORDER through the one order-persistence point
   // (reorder() — it needs the comic's COMPLETE page set). On a reorder
   // failure the already-created row is kept locally (server truth) so the
   // two never drift — the owner can retry or delete it.
-  const insertCaptionPage = useCallback(async (side) => {
+  const insertCaptionPage = useCallback(async (side, pageId) => {
     if (selectedId === null) { setError('Select a comic first.'); return }
-    if (activePageId === null) { setError('Select a page first.'); return }
+    // B18 round 2, substep 13 — the '+' now targets the page it sits on (ANY
+    // page, not just the active one); the active-page fallback keeps the old
+    // call shape working.
+    const pid = pageId != null ? pageId : activePageId
+    if (pid == null) { setError('Select a page first.'); return }
     if (reorderingRef.current) return
     const mine = selectedPages
-    const idx = mine.findIndex(p => p.id === activePageId)
+    const idx = mine.findIndex(p => p.id === pid)
     if (idx === -1) { setError('Select a page first.'); return }
     const nextNumber = mine.reduce((m, p) => Math.max(m, Number(p.page_number) || 0), 0) + 1
     let newPage = null
@@ -1482,32 +1507,63 @@ export default function ComicEditor({
     if (!target) { setError('No adjacent image page to merge into.'); return }
     const base = String(target.caption || '').trim()
     const extra = String(mine[idx].caption || '').trim()
-    const merged = [base, extra].filter(Boolean).join('\n')
-    if (merged !== (target.caption ?? null)) await saveCaption(target.id, merged)
+    // B18 round 2, substep 9 — merge keeps BOTH texts, separated by a blank
+    // line (the owner's review: "the other text is lost").
+    const merged = [base, extra].filter(Boolean).join('\n\n')
+    if (merged !== (target.caption ?? null)) {
+      // Substep 9 bug fix — FLUSH the pending debounced caption saves on
+      // BOTH pages before the programmatic save: a stale timer armed by
+      // typing into the target (or the caption page) would otherwise fire
+      // AFTER the merge's PATCH and overwrite the merged text — the
+      // owner-reproduced loss (2026-10-02).
+      const timers = captionTimers.current
+      for (const id of [target.id, pageId]) {
+        if (timers[id]) { clearTimeout(timers[id]); delete timers[id] }
+      }
+      const ok = await saveCaption(target.id, merged)
+      if (!ok) {
+        // The save FAILED — the caption page is KEPT (deleting it would lose
+        // its text, and the target never received the merged text either).
+        setError('The merged caption could not be saved — the caption page was kept.')
+        return
+      }
+      // saveCaption PATCHes the server; mirror the merged text locally so
+      // the target's bar shows it before the splice below.
+      setPages(prev => prev.map(p2 => (p2.id === target.id ? { ...p2, caption: merged } : p2)))
+    }
     await deletePage(pageId)                       // the server renumbers 1..N
-  }, [selectedPages, saveCaption, deletePage, setError])
+  }, [selectedPages, saveCaption, deletePage, setError, setPages])
 
-  // B2.5 Step 15 (folded into B18): the per-comic theme colour — an immediate
-  // PUT (null clears it). The PUT is a partial update (absent fields keep
-  // their row values), so sending only theme_colour is safe.
-  const setThemeColour = useCallback(async (value) => {
+  // B2.5 Step 15 (folded into B18), reworked in B18 round 2 substep 7: the
+  // per-comic theme colour. The <input type="color"> fires an `input` event
+  // for EVERY tick of a drag-pick, so a PUT-per-event made the swatch lag —
+  // now the local value updates OPTIMISTICALLY (instant while picking) and
+  // ONE debounced PUT (~400 ms) persists it. The PUT is a partial update
+  // (absent fields keep their row values), so sending only theme_colour is
+  // safe; null clears it.
+  const themeTimer = useRef(null)                  // pending debounced theme PUT
+  const setThemeColour = useCallback((value) => {
     if (selectedId === null) return
     setError(null)
-    try {
-      const res = await fetch(`/api/admin/comics/${selectedId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-        body: JSON.stringify({ theme_colour: value }),
-      })
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || `set theme colour answered ${res.status}`)
+    setComics(prev => prev.map(c => (c.id === selectedId ? { ...c, theme_colour: value } : c)))
+    if (themeTimer.current) { clearTimeout(themeTimer.current); themeTimer.current = null }
+    themeTimer.current = setTimeout(async () => {
+      themeTimer.current = null
+      try {
+        const res = await fetch(`/api/admin/comics/${selectedId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+          body: JSON.stringify({ theme_colour: value }),
+        })
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}))
+          throw new Error(data.error || `set theme colour answered ${res.status}`)
+        }
+      } catch (err) {
+        setError(err.message)   // the optimistic value stays (retry/clear to fix)
       }
-      setComics(prev => prev.map(c => (c.id === selectedId ? { ...c, theme_colour: value } : c)))
-    } catch (err) {
-      setError(err.message)
-    }
-  }, [selectedId, csrfToken, setComics, setError])
+    }, 400)
+  }, [selectedId, csrfToken, setComics, setError, themeTimer])
 
   // --- Step 12.5b: MULTI-delete (the heading pill + the Delete key) ---------
   //
@@ -1791,6 +1847,25 @@ export default function ComicEditor({
                   : 'Optional — tints this comic\'s captions'}
                 onChange={e => setThemeColour(e.target.value)}
               />
+              {/* B18 round 2, substep 8 — one-click screen pick (the
+                  EyeDropper API, Chrome/Edge 105+). Feature-detected: the
+                  button simply does not exist in browsers without it.
+                  Cancelling the picker throws — swallow it. */}
+              {'EyeDropper' in window && (
+                <button
+                  type="button"
+                  className="theme-dropper"
+                  title="Pick a colour from anywhere on screen"
+                  onClick={async () => {
+                    try {
+                      const res = await new window.EyeDropper().open()
+                      setThemeColour(res.sRGBHex)
+                    } catch { /* the user cancelled the picker */ }
+                  }}
+                >
+                  Eyedropper
+                </button>
+              )}
               <button
                 type="button"
                 className="theme-clear"
@@ -1980,7 +2055,22 @@ export default function ComicEditor({
                     >
                       {p.file_path
                         ? <img src={p.file_path} alt={`Page ${p.page_number}`} />
-                        : <div className="page-tile-caption" aria-hidden="true">Caption page</div>}
+                        : (
+                          /* B18 round 2, substep 2 — the caption tile carries
+                             the comic's theme colour (inline, so it can't be
+                             overridden) + a bit of the caption text. */
+                          <div
+                            className="page-tile-caption"
+                            aria-hidden="true"
+                            style={selectedComic && selectedComic.theme_colour
+                              ? { background: selectedComic.theme_colour, color: legibleTextOn(selectedComic.theme_colour) }
+                              : undefined}
+                          >
+                            {p.caption
+                              ? <span className="page-tile-caption-text">{p.caption}</span>
+                              : 'Caption page'}
+                          </div>
+                        )}
                       <span className="page-tile-label">Page {p.page_number}</span>
                       {/* Step 12.5a — semi-transparent hover bin, top-right;
                           surgical: deletes THIS page (stopPropagation keeps
@@ -2090,72 +2180,183 @@ export default function ComicEditor({
                   >
                     {/* B18 — the caption POSITION model: 'top' (default) |
                         'bottom' | 'page' (a caption-only page, no image).
-                        The four '+' affordances surround the ACTIVE page:
-                        up/down = attach the caption above/below the image
-                        (image pages only); left/right = insert a caption-only
-                        page before/after it. The caption node + the image
-                        node are emitted in the order the position demands.
-                        (The Step-8 caption editor + Step-4 auto-save flow is
-                        unchanged — the input just moves above/below the image,
-                        and a 'page' row swaps the input for a larger box.) */}
+                        B18 round 2 — the interaction model (spec:
+                        editor-overhaul.md §1): NO default caption box — the
+                        bar exists only where the owner put one (clicking a
+                        bar arms the inline input; the top/bottom '+' on a
+                        captionless page creates the bar there). The four '+'
+                        surround the IMAGE, on hover, for ANY page: on a page
+                        that HAS a caption (or a caption page) all four INSERT
+                        an adjacent caption page (top/left → before,
+                        bottom/right → after — including above page 1 / below
+                        the last page); a hover bin (top-right) deletes the
+                        caption (or the caption page itself). The caption node
+                        + the image node are emitted in the order the position
+                        demands. */}
                     {(() => {
                       const isCaptionPage = !p.file_path
                       const pos = p.caption_position || 'top'
+                      const hasCaption = !isCaptionPage && !!(p.caption && String(p.caption).trim())
                       const theme = selectedComic && selectedComic.theme_colour
                       const capStyle = theme ? { background: theme, color: legibleTextOn(theme) } : undefined
+                      const editing = captionEditId === p.id
+                      const plusDisabled = deleting || reordering
 
-                      // The caption node — editable when active, read-only otherwise.
+                      const stop = (fn) => (e) => { e.stopPropagation(); fn() }
+                      // Disarm on blur — EXCEPT when focus is moving to another
+                      // control INSIDE the same widget (e.g. the Merge button or
+                      // the bin). A real mousedown on such a control blurs the
+                      // input first; if that blur disarmed the widget, React would
+                      // unmount the button before mouseup/click and the click would
+                      // never land (the merge would silently no-op). Containing the
+                      // disarm to "focus left the widget" keeps the control mounted
+                      // for its own click while still disarming on a genuine click-away.
+                      const disarmUnlessInside = (e) => {
+                        const related = e.relatedTarget
+                        if (related && related.nodeType === 1) {
+                          const host = e.currentTarget.closest('.caption-page-box, .cap-bar')
+                          if (host && host.contains(related)) return
+                        }
+                        if (captionSave !== 'error') setCaptionEditId(null)
+                      }
+                      const plus = (side, title, onClick) => (
+                        <button
+                          type="button"
+                          className={'cap-plus cap-plus--' + side}
+                          title={title}
+                          aria-label={title}
+                          disabled={plusDisabled}
+                          onClick={onClick}
+                        >
+                          +
+                        </button>
+                      )
+                      // The four '+' behaviours (substeps 3/5/13):
+                      //   • a page WITH a caption / a caption page → ALL FOUR
+                      //     insert an adjacent caption page (owner: "it should
+                      //     insert the page"); top/left = before, bottom/right
+                      //     = after.
+                      //   • a captionless image page → top/bottom '+' create
+                      //     the bar there (arm the empty input at that
+                      //     position); left/right '+' insert a caption page.
+                      const insertAt = (side) => () => insertCaptionPage(side === 'top' || side === 'left' ? 'before' : 'after', p.id)
+                      const armBar = (side) => () => { setCaptionPosition(p.id, side); setCaptionEditId(p.id) }
+                      const bare = !isCaptionPage && !hasCaption   // a captionless image page
+                      const plusHandlers = {
+                        top: bare ? armBar('top') : insertAt('top'),
+                        bottom: bare ? armBar('bottom') : insertAt('bottom'),
+                        left: insertAt('left'),
+                        right: insertAt('right'),
+                      }
+                      const plusTitles = {
+                        top: hasCaption ? 'Insert a caption page above this page' : 'Add the caption above the image',
+                        bottom: hasCaption ? 'Insert a caption page below this page' : 'Add the caption below the image',
+                        left: 'Insert a caption page before this page',
+                        right: 'Insert a caption page after this page',
+                      }
+                      const plusButtons = (
+                        <>
+                          {plus('top', plusTitles.top, stop(plusHandlers.top))}
+                          {plus('bottom', plusTitles.bottom, stop(plusHandlers.bottom))}
+                          {plus('left', plusTitles.left, stop(plusHandlers.left))}
+                          {plus('right', plusTitles.right, stop(plusHandlers.right))}
+                        </>
+                      )
+
+                      // The caption node — the bar (read-only) or the input
+                      // (editing); a caption page is the box itself.
                       let captionNode = null
                       if (isCaptionPage) {
-                        captionNode = isActive ? (
-                          <div className="caption-page-box">
-                            <textarea
-                              className="caption-page-input"
-                              style={capStyle}
-                              value={p.caption ?? ''}
-                              placeholder="Caption page…"
-                              aria-label={`Caption page ${p.page_number}`}
-                              onChange={e => onCaptionChange(p, e.target.value)}
-                            />
-                            <div className="caption-page-actions">
-                              <button
-                                type="button"
-                                className="cap-merge"
-                                title="Merge this caption into the nearest image page"
-                                aria-label="Merge this caption into the nearest image page"
-                                disabled={deleting || !hasImageNeighbor(selectedPages, p.id)}
-                                onClick={e => { e.stopPropagation(); mergeCaptionPage(p.id) }}
-                              >
-                                Merge
-                              </button>
-                            </div>
-                            {captionSave === 'error' ? <span className="caption-status error">{captionError}</span> : null}
-                          </div>
-                        ) : (
-                          <figcaption className="page-caption caption-page-caption" style={capStyle}>
-                            {p.caption || 'Caption page'}
-                          </figcaption>
-                        )
-                      } else if (isActive) {
                         captionNode = (
-                          <>
+                          <div className="caption-page-box">
+                            <PageBin
+                              title={`Delete caption page ${p.page_number}`}
+                              disabled={deleting}
+                              onClick={e => { e.stopPropagation(); deletePage(p.id) }}
+                            />
+                            {editing ? (
+                              <>
+                                <div className="caption-page-frame">
+                                  <textarea
+                                    className="caption-page-input"
+                                    style={capStyle}
+                                    autoFocus
+                                    value={p.caption ?? ''}
+                                    placeholder="Caption page…"
+                                    aria-label={`Caption page ${p.page_number}`}
+                                    onChange={e => onCaptionChange(p, e.target.value)}
+                                    onBlur={disarmUnlessInside}
+                                  />
+                                </div>
+                                <div className="caption-page-actions">
+                                  <button
+                                    type="button"
+                                    className="cap-merge"
+                                    title="Merge this caption into the nearest image page"
+                                    aria-label="Merge this caption into the nearest image page"
+                                    disabled={deleting || !hasImageNeighbor(selectedPages, p.id)}
+                                    onClick={e => { e.stopPropagation(); mergeCaptionPage(p.id) }}
+                                  >
+                                    Merge
+                                  </button>
+                                  {captionSave === 'error' ? <span className="caption-status error">{captionError}</span> : null}
+                                </div>
+                              </>
+                            ) : (
+                              <div
+                                className="caption-page-frame caption-page-frame--bar"
+                                style={capStyle}
+                                title="Click to edit the caption page"
+                                onClick={e => { e.stopPropagation(); setCaptionEditId(p.id) }}
+                              >
+                                <span className="caption-page-caption">{p.caption || 'Caption page'}</span>
+                              </div>
+                            )}
+                          </div>
+                        )
+                      } else if (editing) {
+                        captionNode = (
+                          <div className="cap-bar" style={capStyle}>
+                            <PageBin
+                              title={`Delete the caption on page ${p.page_number}`}
+                              disabled={deleting}
+                              onClick={e => { e.stopPropagation(); deleteCaption(p.id) }}
+                            />
                             <input
                               type="text"
                               className="caption-input"
                               style={capStyle}
+                              autoFocus
                               value={p.caption ?? ''}
                               placeholder="Caption…"
                               aria-label={`Caption for page ${p.page_number}`}
                               onChange={e => onCaptionChange(p, e.target.value)}
+                              onBlur={disarmUnlessInside}
                             />
                             {captionSave === 'error' ? <span className="caption-status error">{captionError}</span> : null}
-                          </>
+                          </div>
                         )
-                      } else if (p.caption) {
-                        captionNode = <figcaption className="page-caption" style={capStyle}>{p.caption}</figcaption>
+                      } else if (hasCaption) {
+                        captionNode = (
+                          <div
+                            className="cap-bar cap-bar--bar"
+                            style={capStyle}
+                            title="Click to edit the caption"
+                            onClick={e => { e.stopPropagation(); setCaptionEditId(p.id) }}
+                          >
+                            <PageBin
+                              title={`Delete the caption on page ${p.page_number}`}
+                              disabled={deleting}
+                              onClick={e => { e.stopPropagation(); deleteCaption(p.id) }}
+                            />
+                            <span className="page-caption">{p.caption}</span>
+                          </div>
+                        )
                       }
 
-                      // The image wrapper (image pages only — a 'page' row has no image).
+                      // The image wrapper (image pages only — a 'page' row has
+                      // no image). The four '+' live INSIDE it: around the
+                      // image, not the caption bar (substep 3).
                       const imgNode = isCaptionPage ? null : (
                         <div className="preview-imgwrap">
                           <PageBin
@@ -2164,36 +2365,13 @@ export default function ComicEditor({
                             onClick={e => { e.stopPropagation(); deletePage(p.id) }}
                           />
                           <img className="preview-thumb" src={p.file_path} alt={`Page ${p.page_number}`} />
+                          {plusButtons}
                         </div>
                       )
 
-                      // The four '+' affordances (the active page only).
-                      const plus = (side, title, onClick, disabled) => (
-                        <button
-                          type="button"
-                          className={'cap-plus cap-plus--' + side}
-                          title={title}
-                          aria-label={title}
-                          disabled={disabled}
-                          onClick={onClick}
-                        >
-                          +
-                        </button>
-                      )
-                      const stop = (fn) => (e) => { e.stopPropagation(); fn() }
-                      const plusDisabled = deleting || reordering
-                      const attachDisabled = plusDisabled || isCaptionPage
-
                       return (
                         <>
-                          {isActive ? (
-                            <>
-                              {plus('top', 'Attach the caption above the image', stop(() => setCaptionPosition(p.id, 'top')), attachDisabled)}
-                              {plus('bottom', 'Attach the caption below the image', stop(() => setCaptionPosition(p.id, 'bottom')), attachDisabled)}
-                              {plus('left', 'Insert a caption page before this page', stop(() => insertCaptionPage('before')), plusDisabled)}
-                              {plus('right', 'Insert a caption page after this page', stop(() => insertCaptionPage('after')), plusDisabled)}
-                            </>
-                          ) : null}
+                          {isCaptionPage ? plusButtons : null}
                           {/* top → caption above the image; bottom → below;
                               page → the caption node alone (no image). */}
                           {pos === 'bottom' && !isCaptionPage

@@ -29,6 +29,9 @@ b[0-9]*.md
 instruct.md
 process.md
 process-series.md
+# editor-overhaul.md — the proposed B18.1 + unified work-editor rescoping (2026-10-02;
+# same rule: workspace-only, never committed)
+editor-overhaul.md
 # scratch.md — the session working scratchpad (condensed memory / gotchas,
 # updated as work proceeds — same rule: workspace-only, never committed).
 scratch.md

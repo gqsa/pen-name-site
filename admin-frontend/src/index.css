@@ -201,14 +201,18 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 .page-tile { position: relative; aspect-ratio: 1/1; border: 1px solid var(--line); border-radius: 8px; background: #000; overflow: hidden; }
 .page-tile img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .page-tile-label { position: absolute; left: 5px; bottom: 5px; padding: 1px 6px; font-size: 11px; line-height: 1.4; background: rgba(0, 0, 0, .72); border-radius: 4px; }
-.page-caption { margin: 0 0 8px; font-weight: 600; }
+/* B18 round 2, substep 12 — top/bottom caption text is centred relative to
+   the page (the same choice the B8 reader will make). */
+.page-caption { margin: 0 0 8px; font-weight: 600; text-align: center; }
 
 /* Step 8 — the editable caption input now sits above the ACTIVE page's image
    in the PREVIEW (moved here from the left-pane rows; the Step-4 debounce /
    save-state code is unchanged). The global `input` rule already gives
    width/padding; this just sets the spacing to the image. `.caption-status`
    is the saving/saved/error cue, kept beside the input. */
-.caption-input { margin: 0 0 8px; font-size: .95rem; }
+/* B18 round 2, substep 12 — the edited text is centred too (the bar and the
+   input show the same text; keep them visually identical). */
+.caption-input { margin: 0 0 8px; font-size: .95rem; text-align: center; }
 .caption-status { display: block; margin: 0 0 8px; font-size: .8rem; font-weight: 400; line-height: 1.3; }
 /* 2026-09-27 user tweak — the transient save cues ('Saving…' / 'Caption
    saved') now sit in the "Preview" heading row, next to the active-page
@@ -286,11 +290,15 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    applied INLINE (background + a legible text colour via legibleTextOn) so
    it can never be overridden by these rules. */
 
-/* The four "+" affordances around the ACTIVE preview figure — small circular
-   buttons at the four edge midpoints (half overhanging the figure). Up/Down =
-   attach the caption above/below the image (image pages only); Left/Right =
-   insert a caption-only page before/after. A primary action, so always
-   visible on the active page (not a hover-reveal like the trash bin). */
+/* The four "+" affordances around the page — small circular buttons at the
+   four edge midpoints (half overhanging). B18 round 2, substep 3 — they now
+   appear on HOVER of ANY page (not just the active one): hidden until the
+   page is hovered, revealed on hover. The buttons are CHILDREN of the figure
+   (caption pages) / the image wrapper (image pages), so hovering an
+   overhanging button keeps the parent hovered — no flicker loop. Top/Bottom
+   = create the caption bar above/below on a captionless page, insert an
+   adjacent caption page on a captioned one; Left/Right = insert a
+   caption-only page before/after (substeps 5/13). */
 .cap-plus {
   position: absolute;
   display: inline-flex; align-items: center; justify-content: center;
@@ -299,10 +307,15 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
   background: var(--card); color: var(--accent);
   font-size: 15px; line-height: 1; font-weight: 700;
   cursor: pointer; z-index: 5;
-  transition: background .12s ease, color .12s ease;
+  opacity: 0; pointer-events: none;
+  transition: opacity .12s ease, background .12s ease, color .12s ease;
 }
+.preview-figure:hover .cap-plus,
+.preview-imgwrap:hover .cap-plus { opacity: 1; pointer-events: auto; }
 .cap-plus:hover:not(:disabled) { background: var(--accent); color: #fff; }
-.cap-plus:disabled { opacity: .4; cursor: default; }
+.cap-plus:disabled { cursor: default; }
+.preview-figure:hover .cap-plus:disabled,
+.preview-imgwrap:hover .cap-plus:disabled { opacity: .4; pointer-events: none; }
 .cap-plus--top    { top: -11px;    left: 50%;  transform: translateX(-50%); }
 .cap-plus--bottom { bottom: -11px; left: 50%;  transform: translateX(-50%); }
 .cap-plus--left   { left: -11px;   top: 50%;   transform: translateY(-50%); }
@@ -313,13 +326,35 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 .preview-figure--caption { min-width: 280px; max-width: 100%; }
 
 /* A caption page (position 'page'): a larger, centred box for the caption
-   (a textarea — it is a full PAGE of text), with a "Merge" action that folds
-   the text back into the nearest image page (the reversible B18 step). */
-.caption-page-box { text-align: center; }
+   (it IS a full PAGE of text), with a "Merge" action that folds the text
+   back into the nearest image page (the reversible B18 step).
+   B18 round 2, substeps 10/11 — the page is a SQUARE: the frame grows to
+   height = width (`aspect-ratio`) and then the text scrolls inside it. The
+   caption sits centred on BOTH axes — a short caption floats in the middle,
+   a long one scrolls. `field-sizing: content` (Chrome 123+) lets the
+   textarea fit its text so the flex frame can centre it; without the
+   property the textarea keeps its min-height and tops out (graceful). */
+.caption-page-box { position: relative; text-align: center; }
+.caption-page-frame {
+  width: 100%;
+  aspect-ratio: 1/1;
+  display: flex; align-items: center; justify-content: center;
+}
+/* the read-only form — clicking it arms the inline editor */
+.caption-page-frame--bar {
+  padding: 12px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  overflow: hidden;
+}
+.caption-page-frame--bar .caption-page-caption { margin: 0; }
 .caption-page-input {
-  width: 100%; min-height: 84px;
+  width: 100%;
+  field-sizing: content;
+  min-height: 48px; max-height: 100%;
+  margin: 0;
   padding: 12px 14px; font-size: 1rem; line-height: 1.5;
-  text-align: center; resize: vertical;
+  text-align: center; resize: none; overflow-y: auto;
 }
 .caption-page-actions { display: flex; justify-content: center; margin-top: 8px; }
 .cap-merge {
@@ -333,13 +368,44 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 .caption-page-caption { text-align: center; white-space: pre-wrap; }
 
 /* A caption-only TILE (grid / fill zoom regimes): there is no <img>, so a
-   centred placeholder over the tile's usual black background + label. */
+   centred placeholder over the tile's usual black background + label.
+   B18 round 2, substep 2 — the tile also carries the comic's theme colour
+   (INLINE, so it can't be overridden here) + a bit of the caption text
+   (clamped so a long caption can't break the tile). */
 .page-tile-caption {
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;
   font-size: 12px; font-weight: 600; color: var(--muted);
   text-align: center; padding: 8px;
 }
+.page-tile-caption-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.4;
+}
+
+/* B18 round 2 — the caption BAR on an image page: the resting (read-only)
+   form of a page's caption — shown ONLY where the owner put one (substep 5:
+   no default box). Clicking it arms the inline input (the editing form,
+   same .cap-bar). The theme colour tints it (inline). The hover bin
+   (top-right, substep 4) deletes the caption. */
+.cap-bar {
+  position: relative;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.cap-bar--bar .page-caption { margin: 0; }
+.cap-bar .caption-input { display: block; width: 100%; margin: 0 0 4px; }
+.cap-bar .caption-status { margin: 4px 0 0; text-align: center; }
+/* the bar's hover bin overhangs its top-right corner */
+.cap-bar .page-bin { top: -9px; right: -9px; }
+.cap-bar:hover .page-bin,
+.caption-page-box:hover .page-bin { opacity: 1; pointer-events: auto; }
+.caption-page-box .page-bin { top: -10px; right: -10px; }
 
 /* The theme-colour control (left pane): a compact swatch + a "Clear" pill.
    The global `input` rule would make the swatch a full-width block, so
@@ -350,6 +416,14 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
   flex: 0 0 auto; width: 44px; height: 30px; padding: 2px; margin: 0;
   cursor: pointer; background: transparent;
 }
+/* B18 round 2, substep 8 — the eyedropper button (one-click screen pick;
+   only rendered where window.EyeDropper exists). */
+.theme-dropper {
+  flex: 0 0 auto; padding: 3px 12px; font-size: 12px; font-weight: 600;
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 999px; cursor: pointer;
+}
+.theme-dropper:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .theme-clear {
   flex: 0 0 auto; padding: 3px 12px; font-size: 12px; font-weight: 600;
   background: transparent; color: var(--muted);
