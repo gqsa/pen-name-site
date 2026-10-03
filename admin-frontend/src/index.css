@@ -202,8 +202,12 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 .page-tile img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .page-tile-label { position: absolute; left: 5px; bottom: 5px; padding: 1px 6px; font-size: 11px; line-height: 1.4; background: rgba(0, 0, 0, .72); border-radius: 4px; }
 /* B18 round 2, substep 12 — top/bottom caption text is centred relative to
-   the page (the same choice the B8 reader will make). */
-.page-caption { margin: 0 0 8px; font-weight: 600; text-align: center; }
+   the page (the same choice the B8 reader will make).
+   B18 round 3, pt 10 — `text-align` is INERT on the inline <span> the
+   bar's text is (the "still not centred" complaint): make it a block, and
+   pre-wrap so multi-line captions (merged text, Ctrl+Enter) keep their
+   line breaks. */
+.page-caption { display: block; margin: 0 0 8px; font-weight: 600; text-align: center; white-space: pre-wrap; }
 
 /* Step 8 — the editable caption input now sits above the ACTIVE page's image
    in the PREVIEW (moved here from the left-pane rows; the Step-4 debounce /
@@ -211,8 +215,11 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    width/padding; this just sets the spacing to the image. `.caption-status`
    is the saving/saved/error cue, kept beside the input. */
 /* B18 round 2, substep 12 — the edited text is centred too (the bar and the
-   input show the same text; keep them visually identical). */
-.caption-input { margin: 0 0 8px; font-size: .95rem; text-align: center; }
+   input show the same text; keep them visually identical).
+   B18 round 3, pt 12 — the bar editor is now a <textarea> (multi-line:
+   Enter commits, Ctrl/⌘+Enter = a line break): starts one line tall, grows
+   with the text, no resize handle. */
+.caption-input { margin: 0 0 8px; font-size: .95rem; line-height: 1.4; text-align: center; resize: none; min-height: 0; }
 .caption-status { display: block; margin: 0 0 8px; font-size: .8rem; font-weight: 400; line-height: 1.3; }
 /* 2026-09-27 user tweak — the transient save cues ('Saving…' / 'Caption
    saved') now sit in the "Preview" heading row, next to the active-page
@@ -327,34 +334,45 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 
 /* A caption page (position 'page'): a larger, centred box for the caption
    (it IS a full PAGE of text), with a "Merge" action that folds the text
-   back into the nearest image page (the reversible B18 step).
-   B18 round 2, substeps 10/11 — the page is a SQUARE: the frame grows to
-   height = width (`aspect-ratio`) and then the text scrolls inside it. The
-   caption sits centred on BOTH axes — a short caption floats in the middle,
-   a long one scrolls. `field-sizing: content` (Chrome 123+) lets the
-   textarea fit its text so the flex frame can centre it; without the
-   property the textarea keeps its min-height and tops out (graceful). */
+   into the nearest CAPTION PAGE (B18 round 3, pts 4/5 — never an image
+   page).
+   B18 round 3, pt 7 — a FIXED, PREDICTABLE frame (both forms): min 96px
+   (about 3 lines), growing with the text to max 288px (about 7 lines),
+   then inner scroll. The old square + field-sizing growth made the box
+   morph as the owner typed ("narrowing to a single line and growing as I
+   type… captions and caption pages should always look like their final
+   form"); now the box is its final form from the first keystroke — short
+   text floats centred in the 96px frame, long text fills 288px and
+   scrolls. `overscroll-behavior: contain` (pt 9) stops the scroll CHAIN:
+   a scroll that reaches the box's edge must not drag the preview window
+   with it. */
 .caption-page-box { position: relative; text-align: center; }
 .caption-page-frame {
   width: 100%;
-  aspect-ratio: 1/1;
+  min-height: 96px;
   display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
 }
 /* the read-only form — clicking it arms the inline editor */
 .caption-page-frame--bar {
+  min-height: 96px;
+  max-height: 288px;
   padding: 12px 14px;
   border-radius: 6px;
   cursor: pointer;
-  overflow: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .caption-page-frame--bar .caption-page-caption { margin: 0; }
 .caption-page-input {
   width: 100%;
   field-sizing: content;
-  min-height: 48px; max-height: 100%;
+  min-height: 48px; max-height: 288px;
   margin: 0;
   padding: 12px 14px; font-size: 1rem; line-height: 1.5;
   text-align: center; resize: none; overflow-y: auto;
+  overscroll-behavior: contain;
+  box-sizing: border-box;
 }
 .caption-page-actions { display: flex; justify-content: center; margin-top: 8px; }
 .cap-merge {
@@ -423,7 +441,10 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
   background: transparent; color: var(--muted);
   border: 1px solid var(--line); border-radius: 999px; cursor: pointer;
 }
-.theme-dropper:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.theme-dropper:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+/* B18 round 3, pt 11 — the button is now ALWAYS rendered; in a browser
+   without the EyeDropper API it is disabled (the JSX title explains why). */
+.theme-dropper:disabled { opacity: .45; cursor: default; }
 .theme-clear {
   flex: 0 0 auto; padding: 3px 12px; font-size: 12px; font-weight: 600;
   background: transparent; color: var(--muted);
@@ -499,6 +520,66 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    child, so the two coexist. */
 .preview-figure--drop-before { box-shadow: 0 -5px 0 0 #fff; }
 .preview-figure--drop-after { box-shadow: 0 5px 0 0 #fff; }
+
+/* B18 round 3, pt 5 — the CAPTION-drag cue: the same mechanics as the
+   white PAGE-drag edges, in the theme red so the two drag kinds read apart
+   (red = a caption is landing here; white = a page). The grid/list cues
+   are ::before bars (they must COEXIST with the --active/--selected
+   rings); the merge ring is an ::after outline for the same reason. */
+.preview-figure--cap-top,
+.preview-figure--cap-before { box-shadow: 0 -5px 0 0 var(--accent); }
+.preview-figure--cap-bottom,
+.preview-figure--cap-after { box-shadow: 0 5px 0 0 var(--accent); }
+.preview-figure--cap-merge { box-shadow: 0 0 0 3px var(--accent); }
+.page-tile--cap-edge-left::before,
+.page-tile--cap-edge-right::before,
+.page-tile--cap-edge-top::before,
+.page-tile--cap-edge-bottom::before,
+.page-list-item--cap-edge-top::before,
+.page-list-item--cap-edge-bottom::before {
+  content: ""; position: absolute; z-index: 3; background: var(--accent);
+}
+.page-tile--cap-edge-left::before { top: 0; bottom: 0; width: 3px; left: 0; }
+.page-tile--cap-edge-right::before { top: 0; bottom: 0; width: 3px; right: 0; }
+.page-tile--cap-edge-top::before,
+.page-list-item--cap-edge-top::before { left: 0; right: 0; height: 2px; top: 0; }
+.page-tile--cap-edge-bottom::before,
+.page-list-item--cap-edge-bottom::before { left: 0; right: 0; height: 2px; bottom: 0; }
+.page-tile--cap-merge::after,
+.page-list-item--cap-merge::after {
+  content: ""; position: absolute; inset: -3px;
+  border: 2px solid var(--accent); border-radius: 8px;
+  pointer-events: none; z-index: 3;
+}
+/* The dragged caption's source fades (the house --dragging cue). */
+.caption-node--dragging { opacity: .45; }
+
+/* B18 round 3, pt 15 — the FAKE caption page (the empty-state anchor in
+   BOTH panes): the site's theme red, "Disrupt the narrative…" in white
+   italic, the '+' centred below it. Click → a real caption page of the
+   DEFAULT colour at slot 0; the fake one then vanishes (both empty states
+   are plain `selectedPages.length === 0` conditionals — it can never
+   coexist with a real page). */
+.fake-tile { cursor: pointer; }
+.fake-tile:hover { border-color: var(--accent); }
+.fake-caption-page {
+  width: 100%; height: 100%;
+  min-height: 96px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 16px;
+  background: var(--accent); color: #fff;
+  font-style: italic; font-size: .95rem; line-height: 1.4; text-align: center;
+  cursor: pointer; user-select: none;
+  transition: filter .12s ease;
+}
+.fake-caption-page:hover { filter: brightness(1.12); }
+.fake-caption-page:focus-visible { outline: 2px solid #fff; outline-offset: -5px; }
+.fake-caption-text { padding: 0 4px; }
+.fake-caption-plus { font-size: 1.75rem; line-height: 1; font-weight: 700; font-style: normal; margin-top: 2px; }
+/* in the zoomed-out list regime the "tile" is a row, not a square */
+.fake-tile--list { aspect-ratio: auto; }
+.comic-preview--empty { display: flex; justify-content: center; align-items: flex-start; padding: 24px 14px; }
+.comic-preview--empty .fake-caption-page { width: 280px; height: auto; min-height: 120px; }
 
 /* B2.6r — LANDSCAPE (a maximised window: width ≥ height) uses the side
    space the portrait layout leaves empty; PORTRAIT (the default rules

@@ -176,15 +176,30 @@ function legibleTextOn(hex) {
   return lum > 150 ? '#1a1a1a' : '#ffffff'
 }
 
-// B18 — does `pageId` have a NEIGHBOURING image page (the one right before or
-// the one right after in page_number order)? A caption page can only "Merge"
-// into an image page, so this drives the Merge button's disabled state.
-function hasImageNeighbor(pages, pageId) {
+// B18 round 3, pt 5 — does `pageId` have a NEIGHBOURING caption-only page
+// (the one right before or the one right after in page_number order)? The
+// Merge button folds a caption page into the nearest CAPTION PAGE (the owner:
+// "there shouldn't be an option to merge a caption page with an actual page")
+// — an image page is NEVER a merge destination — so this drives the Merge
+// button's disabled state. (Round 2's `hasImageNeighbor` is superseded.)
+function hasCaptionPageNeighbor(pages, pageId) {
   const i = pages.findIndex(x => x.id === pageId)
   if (i === -1) return false
-  if (i > 0 && pages[i - 1].file_path) return true
-  if (i < pages.length - 1 && pages[i + 1].file_path) return true
+  if (i > 0 && !pages[i - 1].file_path) return true
+  if (i < pages.length - 1 && !pages[i + 1].file_path) return true
   return false
+}
+
+// B18 round 3, pt 4 — the nearest caption-only page to `pageId` (the closest
+// one before it, else the closest one after), or null when there is none.
+// The merge BUTTON's destination; the DRAG path uses the exact drop target
+// instead, so the two can legitimately differ.
+function nearestCaptionPage(pages, pageId) {
+  const i = pages.findIndex(x => x.id === pageId)
+  if (i === -1) return null
+  for (let j = i - 1; j >= 0; j--) if (!pages[j].file_path) return pages[j]
+  for (let j = i + 1; j < pages.length; j++) if (!pages[j].file_path) return pages[j]
+  return null
 }
 
 // Step 10 — wheel-zoom regime bounds (Windows-folder style). `zoom` runs
@@ -322,6 +337,34 @@ function PageBin({ title, disabled, onClick }) {
   )
 }
 
+// B18 round 3, pt 15 — the FAKE caption page: "I want a + on the preview
+// plane and in the position of first tile when there are no pages in the
+// editor… a false caption page with the site's theme red that says 'Disrupt
+// the narrative...' in white italics, with the '+' sign centralised below
+// it." Purely a visual anchor — NO page exists until it is clicked
+// (onAdd → insertCaptionPageAt(0) → a real caption page of the default
+// colour, slot 0). It vanishes the moment any real page is added — the two
+// empty states are plain `selectedPages.length === 0` conditionals, so the
+// fake page can never coexist with real pages (noted in progress.md).
+function FakeCaptionPage({ onAdd }) {
+  return (
+    <div
+      className="fake-caption-page"
+      role="button"
+      tabIndex={0}
+      title="Add a caption page"
+      aria-label="Add a caption page"
+      onClick={onAdd}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onAdd() }
+      }}
+    >
+      <span className="fake-caption-text">Disrupt the narrative…</span>
+      <span className="fake-caption-plus" aria-hidden="true">+</span>
+    </div>
+  )
+}
+
 // Step 13 — the FILE-vs-REORDER disambiguation. An OS file drag carries the
 // 'Files' type on dataTransfer; an internal tile/preview reorder drag never
 // does (it only sets 'text/plain', for Firefox's "set something or no drag"
@@ -389,6 +432,27 @@ export default function ComicEditor({
   // Step 12.5e), so the drop lands exactly where the marker was — the grid's
   // answer to the preview's before/after bar.
   const [gridDropSlot, setGridDropSlot] = useState(null)
+  // B18 round 3, pt 5 — CAPTION drag state (round 2 substep 6, pulled
+  // forward): an independent drag of a caption bar or a caption page (as
+  // opposed to a page drag — pt 2's "dragging a caption drags the whole
+  // page"). `capDragRef` holds the drag SOURCE at event time:
+  //   { kind: 'bar' | 'page', pageId, text, position }
+  // — `text`/`position` snapshotted at dragstart (the bar's live text is the
+  // state value at that moment). `capDragPageId` (state) drives the fading
+  // --dragging cue on the source's bar/frame; `capDrop` (state) drives the
+  // target cues: { pageId, pos } (a page half), { pageId, merge } (onto a
+  // caption/caption page) or { slot } (a gap index into the comic's page
+  // list; in the preview the slot is computed from the VISIBLE index at
+  // drop time).
+  const capDragRef = useRef(null)
+  const [capDragPageId, setCapDragPageId] = useState(null)
+  const [capDrop, setCapDrop] = useState(null)
+  // applyCaptionDrop is defined further down (it needs the caption functions
+  // — saveCaption/setCaptionPosition/insertCaptionPageAt/deletePage — which
+  // are declared later). The drop handlers (declared BEFORE those) read it
+  // through this ref, the house pattern (deleteSelectionRef is the
+  // precedent). It is bound once, at render, to the latest callback.
+  const applyCaptionDropRef = useRef(null)
 
   // Step 4 — caption auto-save state.
   const captionTimers = useRef({})                       // page id → pending debounce timeout (per page, so one page's timer can't clobber another's)
@@ -895,10 +959,25 @@ export default function ComicEditor({
     setDragBlockIds(null)
     setGridDropSlot(null)
     setPreviewDropIdx(null)
+    // B18 round 3, pt 5 — the caption drag ends the same way (dragend fires
+    // on the caption source's own element, not the figure — clearDrag is the
+    // shared cleanup either way).
+    capDragRef.current = null
+    setCapDragPageId(null)
+    setCapDrop(null)
   }, [])
 
   const onRowDragStart = useCallback((e, page) => {
     if (reorderingRef.current) { e.preventDefault(); return }
+    // B18 round 3, pt 2 — a drag that STARTED on a caption node (a bar or a
+    // caption page's frame) is the CAPTION's own drag, never the page's:
+    // "when i try to drag a caption, it drags the whole page with the
+    // caption." The caption source calls stopPropagation (startCaptionDrag);
+    // this refusal is the second line of defence against any leak through.
+    if (e.target && e.target.closest && e.target.closest('[data-caption-drag]')) {
+      e.preventDefault()
+      return
+    }
     // Never lift the row when the drag started inside an interactive child
     // (a control inside the row must not start a page drag).
     if (e.target && e.target.closest && e.target.closest('input, textarea, button, a, select')) {
@@ -919,6 +998,48 @@ export default function ComicEditor({
       // transfer — the value itself is ignored (we track the id in a ref).
       e.dataTransfer.setData('text/plain', String(page.id))
     }
+  }, [])
+
+  // --- B18 round 3, pt 5 — the CAPTION drag (a bar / a caption page) --------
+  //
+  // The read-only caption bar and the read-only caption-page frame are
+  // DRAGGABLE in their own right (the `data-caption-drag` attribute marks
+  // them). A dragstart there is the CAPTION's drag, not the page's:
+  //   • stopPropagation — the figure/row's React onDragStart (bubbling)
+  //     must not lift the whole page (pt 2),
+  //   • the [data-caption-drag] refusal in onRowDragStart — belt and
+  //     braces against the same leak,
+  //   • the source (kind + pageId + text + position) is snapshotted into
+  //     capDragRef — the drop handlers read it at event time.
+  // Drop targets (applied in applyCaptionDrop, defined below with the
+  // caption logic): a page's TOP/BOTTOM half → that caption slot (merging
+  // if the slot already has text — pt 4, source on top); ONTO a
+  // caption/caption page → merge there; a GAP (between pages / outside —
+  // right/below = after, left/above = before) → a caption page lands
+  // there (a bar becomes one, carrying its text; a caption page moves).
+  const startCaptionDrag = useCallback((e, kind, page) => {
+    e.stopPropagation()
+    if (reorderingRef.current) { e.preventDefault(); return }
+    capDragRef.current = {
+      kind,                                  // 'bar' | 'page'
+      pageId: page.id,
+      text: page.caption ?? '',
+      position: page.caption_position || 'top',
+    }
+    setCapDragPageId(page.id)
+    setCapDrop(null)
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move'
+      // Firefox will not start a drag at all unless something is set on the
+      // transfer — the value is ignored (the source lives in capDragRef).
+      e.dataTransfer.setData('text/plain', 'caption:' + page.id)
+    }
+  }, [reorderingRef])
+
+  const endCaptionDrag = useCallback(() => {
+    capDragRef.current = null
+    setCapDragPageId(null)
+    setCapDrop(null)
   }, [])
 
   // --- Step 12.5e — the block-drop model (single page = a block of one) ----
@@ -1045,11 +1166,78 @@ export default function ComicEditor({
     const i = pages.findIndex(p => p.id === targetId)
     return i === -1 ? null : i                   // the gap BEFORE that page
   }, [])
+
+  // B18 round 3, pt 5 — resolve a CAPTION drag's drop target from the
+  // pointer, shared by the grid's AND the preview's dragover/drop so the
+  // cue and the drop can never disagree:
+  //   { pageId, pos }    — over a page's TOP/BOTTOM half → that caption slot,
+  //   { pageId, merge }  — onto a caption/caption page → MERGE there (pt 4),
+  //   { slot }           — a GAP in the GRID (index 0..n into the comic's
+  //                        page list; n = the end),
+  //   { slotVisible }    — a GAP in the PREVIEW (index 0..n into the VISIBLE
+  //                        figure list — normalized onto the full list at
+  //                        apply time, the way onSectionDrop does).
+  const resolveCaptionTarget = useCallback((e) => {
+    const pages = selectedPagesRef.current
+    const t = e.target
+    const inPreview = !!(t && t.closest && t.closest('.comic-preview'))
+    if (inPreview) {
+      const scroller = previewRef.current
+      const figures = scroller ? Array.from(scroller.querySelectorAll('.preview-figure')) : []
+      // A figure directly under the pointer → its half (or merge).
+      let fig = null
+      for (let i = 0; i < figures.length; i++) {
+        const r = figures[i].getBoundingClientRect()
+        if (e.clientY >= r.top && e.clientY <= r.bottom) { fig = figures[i]; break }
+      }
+      if (fig) {
+        const id = Number(fig.dataset.pageId)
+        const page = pages.find(p => p.id === id)
+        if (page) {
+          if (!page.file_path) return { pageId: id, merge: true }
+          const r = fig.getBoundingClientRect()
+          return { pageId: id, pos: (e.clientY < r.top + r.height / 2) ? 'top' : 'bottom' }
+        }
+      }
+      // A gap = the first figure whose vertical midpoint is below the
+      // pointer (the same scan the page drag uses); none → after the last.
+      let idx = figures.length
+      for (let i = 0; i < figures.length; i++) {
+        const r = figures[i].getBoundingClientRect()
+        if (e.clientY < r.top + r.height / 2) { idx = i; break }
+      }
+      return { slotVisible: idx }
+    }
+    // Grid (tile or list row): the cell under the pointer, else the gap.
+    const cell = (t && t.closest) ? t.closest('li[data-page-id]') : null
+    if (cell) {
+      const id = Number(cell.dataset.pageId)
+      const page = pages.find(p => p.id === id)
+      if (page) {
+        if (!page.file_path) return { pageId: id, merge: true }
+        const r = cell.getBoundingClientRect()
+        return { pageId: id, pos: (e.clientY < r.top + r.height / 2) ? 'top' : 'bottom' }
+      }
+    }
+    const targetId = gapFromEvent(e)
+    const slot = targetId == null ? pages.length : pages.findIndex(p => p.id === targetId)
+    return { slot: slot === -1 ? pages.length : slot }
+  }, [gapFromEvent])
+
   const onGridDragOver = useCallback((e) => {
     const isFile = dragHasFiles(e)
-    if (!isFile && dragIdRef.current === null) return   // not our drag (no Files, no internal drag)
+    const isCap = capDragRef.current !== null
+    if (!isFile && !isCap && dragIdRef.current === null) return   // not our drag (no Files, no internal drag)
     e.preventDefault()                        // REQUIRED for the drop to be allowed
     if (e.dataTransfer) e.dataTransfer.dropEffect = isFile ? 'copy' : 'move'
+    // B18 round 3, pt 5 — a CAPTION drag shows its own cue (half / merge /
+    // gap — resolveCaptionTarget) and never the page-drag slot marker.
+    if (isCap) {
+      setPreviewDropIdx(null)
+      setGridDropSlot(null)
+      setCapDrop(resolveCaptionTarget(e))
+      return
+    }
     // Step 11.5c — ONE resolver (gapFromEvent) for the marker AND every grid
     // drop; it handles the grid halves, the list halves, the list-body scan,
     // and the grid gutter (→ the end gap, 11.5b). resolveGridSlot maps it to
@@ -1061,7 +1249,7 @@ export default function ComicEditor({
     // onSectionDrop can never read a stale one.
     setPreviewDropIdx(null)
     setGridDropSlot(isFile ? resolveFileSlot(gapFromEvent(e)) : resolveGridSlot(gapFromEvent(e)))
-  }, [resolveFileSlot, resolveGridSlot, gapFromEvent])
+  }, [resolveFileSlot, resolveGridSlot, gapFromEvent, resolveCaptionTarget, setCapDrop])
   const onGridDragLeave = useCallback((e) => {
     // Did the pointer actually LEAVE the grid <ul>? Two signals, in order:
     //   1. relatedTarget (when the browser sets it on the dragleave): if it
@@ -1077,11 +1265,11 @@ export default function ComicEditor({
     // either relatedTarget behaviour instead of betting on one.
     const rt = e.relatedTarget
     if (rt) {
-      if (!e.currentTarget.contains(rt)) setGridDropSlot(null)
+      if (!e.currentTarget.contains(rt)) { setGridDropSlot(null); setCapDrop(null) }
       return
     }
-    if (e.target === e.currentTarget) setGridDropSlot(null)
-  }, [])
+    if (e.target === e.currentTarget) { setGridDropSlot(null); setCapDrop(null) }
+  }, [setCapDrop])
 
   // The ONE place a new order is computed + persisted. `next` must be the
   // comic's COMPLETE page set in the new order (the server 400s a partial list).
@@ -1190,6 +1378,20 @@ export default function ComicEditor({
   // list-body scan, or the gutter → the end gap). Same flow as onRowDrop.
   const onListDrop = useCallback((e) => {
     e.preventDefault()
+    // B18 round 3, pt 5 — a CAPTION drop (bar / caption page) applies where
+    // the cue was (resolveCaptionTarget — the same half/merge/gap logic the
+    // dragover used), then the page-drop machinery is skipped entirely.
+    // applyCaptionDrop is defined further down (it needs the caption
+    // functions) — read it through the house ref pattern (deleteSelectionRef
+    // is the precedent).
+    const capSrc = capDragRef.current
+    if (capSrc) {
+      const target = resolveCaptionTarget(e)
+      clearDrag()
+      endCaptionDrag()
+      if (applyCaptionDropRef.current) applyCaptionDropRef.current(capSrc, target)
+      return
+    }
     const draggedId = dragIdRef.current
     if (draggedId === null || reorderingRef.current) return
     const targetId = gapFromEvent(e)
@@ -1198,7 +1400,7 @@ export default function ComicEditor({
     if (!plan) return                            // the drop would be a no-op
     reorder(plan.next)
     commitDragActive(draggedId)
-  }, [clearDrag, reorder, planBlockDrop, commitDragActive, gapFromEvent])
+  }, [clearDrag, reorder, planBlockDrop, commitDragActive, gapFromEvent, resolveCaptionTarget, endCaptionDrag])
 
   // --- Step 9.5: drag-reorder on the PREVIEW ----------------------------------
   //
@@ -1220,9 +1422,18 @@ export default function ComicEditor({
 
   const onPreviewDragOver = useCallback((e) => {
     const isFile = dragHasFiles(e)
-    if (!isFile && dragIdRef.current === null) return   // not our drag
+    const isCap = capDragRef.current !== null
+    if (!isFile && !isCap && dragIdRef.current === null) return   // not our drag
     e.preventDefault()                        // REQUIRED for the drop to be allowed
     if (e.dataTransfer) e.dataTransfer.dropEffect = isFile ? 'copy' : 'move'
+    // B18 round 3, pt 5 — a CAPTION drag shows its own cue (half / merge /
+    // gap — resolveCaptionTarget) and never the page-drag insertion bar.
+    if (isCap) {
+      setGridDropSlot(null)
+      setPreviewDropIdx(null)
+      setCapDrop(resolveCaptionTarget(e))
+      return
+    }
     // Step 14 — file drags also show the insertion bar (the slot is an index
     // into the VISIBLE list; onSectionDrop maps it onto the full page set).
     const scroller = previewRef.current
@@ -1247,16 +1458,28 @@ export default function ComicEditor({
     // have already fired, but the slot could still be a number).
     setGridDropSlot(null)
     setPreviewDropIdx(idx)
-  }, [])
+  }, [resolveCaptionTarget, setCapDrop])
 
   const onPreviewDragLeave = useCallback((e) => {
     // dragleave fires when the pointer moves onto a child — ignore that.
     if (e.relatedTarget && e.currentTarget.contains(e.relatedTarget)) return
     setPreviewDropIdx(null)
-  }, [])
+    setCapDrop(null)
+  }, [setCapDrop])
 
   const onPreviewDrop = useCallback((e) => {
     e.preventDefault()
+    // B18 round 3, pt 5 — a CAPTION drop applies where the cue was
+    // (resolveCaptionTarget — the same half/merge/gap logic the dragover
+    // used), then the page-drop machinery is skipped.
+    const capSrc = capDragRef.current
+    if (capSrc) {
+      const target = resolveCaptionTarget(e)
+      clearDrag()
+      endCaptionDrag()
+      if (applyCaptionDropRef.current) applyCaptionDropRef.current(capSrc, target)
+      return
+    }
     const draggedId = dragIdRef.current
     const slot = previewDropIdx
     if (draggedId === null || reorderingRef.current || slot === null) return
@@ -1272,7 +1495,7 @@ export default function ComicEditor({
     if (!plan) return
     reorder(plan.next)
     commitDragActive(draggedId)
-  }, [previewDropIdx, clearDrag, reorder, planBlockDrop, commitDragActive])
+  }, [previewDropIdx, clearDrag, reorder, planBlockDrop, commitDragActive, resolveCaptionTarget, endCaptionDrag])
 
   // --- Step 4: caption auto-save ------------------------------------------------
   //
@@ -1322,6 +1545,49 @@ export default function ComicEditor({
     }, 600)
   }, [saveCaption, captionSave])
 
+  // B18 round 3, pts 3/4/12 — flush ONE page's pending debounce timer (the
+  // house pattern from round 2 substep 9, generalized): a programmatic
+  // save/delete must never race a stale timer armed by typing.
+  const flushCaptionTimer = useCallback((pageId) => {
+    const timers = captionTimers.current
+    if (timers[pageId]) { clearTimeout(timers[pageId]); delete timers[pageId] }
+  }, [])
+
+  // B18 round 3, pt 12 — Enter COMMITS and closes out the caption: flush the
+  // pending debounce, disarm (the read-only form returns), and save the
+  // current text now (saveCaption normalizes empty → null, the same as
+  // blur-empty). No navigation — the owner just wants the box closed.
+  const commitCaption = useCallback((page) => {
+    const timers = captionTimers.current
+    if (timers[page.id]) { clearTimeout(timers[page.id]); delete timers[page.id] }
+    setCaptionEditId(null)
+    saveCaption(page.id, page.caption)
+  }, [saveCaption])
+
+  // B18 round 3, pt 12 — the caption keydown contract, shared by the caption
+  // page's textarea and the regular caption's (now multi-line) input:
+  //   Enter        → commit + close (above)
+  //   Ctrl+Enter   → insert a NEWLINE at the caret (stay in the caption)
+  //   Shift+Enter  → newline (the browser's native behaviour — left alone)
+  const onCaptionKeyDown = useCallback((e, page) => {
+    if (e.key !== 'Enter') return
+    if (e.shiftKey) return                      // native newline
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault()
+      const ta = e.target
+      const s = ta.selectionStart ?? ta.value.length
+      const en = ta.selectionEnd ?? ta.value.length
+      // setRangeText mutates the live value + caret (no React state write —
+      // the controlled re-render skips the DOM write when the value is
+      // unchanged, so the caret survives).
+      ta.setRangeText('\n', s, en, 'end')
+      onCaptionChange(page, ta.value)
+      return
+    }
+    e.preventDefault()
+    commitCaption(page)
+  }, [commitCaption, onCaptionChange])
+
   // 2026-09-27 user tweak — the "Caption saved" cue is a MOMENT, not a state:
   // it shows in the preview toolbar (next to the active-page toggle) and fades
   // out after ~3 s. Previously it was pinned under the active page's caption
@@ -1349,18 +1615,25 @@ export default function ComicEditor({
   // + the selection reconcile through the validity effect above. Deleting the
   // LAST page leaves the comic empty ("No pages yet.") — legal, and the
   // validity effect tolerates activePageId = null.
-  const deletePage = useCallback(async (pageId) => {
+  // B18 round 3, pt 5 — `opts.skipConfirm` lets a flow that ALREADY asked
+  // (the merge/drag-drop confirm) delete without a second dialog; the
+  // function now also RETURNS a boolean (true = deleted, false = cancelled
+  // or failed) so callers can react to a refused confirm (the existing
+  // hover-bin callers simply ignore the return).
+  const deletePage = useCallback(async (pageId, opts = {}) => {
     // The hover BIN always passes the page it points at. (Step 12.5a also
     // allowed a no-arg call defaulting to the active page — kept as a
     // harmless fallback; the heading pill + Delete key now go through
     // deletePages/deleteSelection below.)
-    if (deleting) return
+    if (deleting) return false
     if (pageId == null) pageId = activePageId
-    if (pageId == null) return
+    if (pageId == null) return false
     const page = selectedPages.find(p => p.id === pageId)
-    if (!page) return
-    const ok = window.confirm(`Delete page ${page.page_number} (${fileNameOf(page.file_path)})?\nThe remaining pages renumber — this cannot be undone.`)
-    if (!ok) return
+    if (!page) return false
+    if (!opts.skipConfirm) {
+      const ok = window.confirm(`Delete page ${page.page_number} (${fileNameOf(page.file_path)})?\nThe remaining pages renumber — this cannot be undone.`)
+      if (!ok) return false
+    }
     setDeleting(true)
     setError(null)
     const prevPages = pages
@@ -1388,9 +1661,11 @@ export default function ComicEditor({
       setNotice(data.count !== undefined
         ? `Deleted page ${page.page_number} — ${data.count} page${data.count === 1 ? '' : 's'} left.`
         : `Deleted page ${page.page_number}.`)
+      return true
     } catch (err) {
       setPages(prevPages)
       setError(err.message)
+      return false
     } finally {
       setDeleting(false)
     }
@@ -1431,35 +1706,43 @@ export default function ComicEditor({
   }, [pages, csrfToken])
 
   // B18 round 2, substep 4 — the hover BIN on a caption bar: delete the
-  // caption (clear the text → the bar disappears). Flushes that page's
-  // pending debounce first, clears the text optimistically, then PATCHes
-  // null (an explicit null CLEARS the server value).
+  // caption (clear the text → the bar disappears). B18 round 3, pt 3 — now
+  // ASKS first (the owner: "regular captions are getting deleted without a
+  // verification check. caption pages are correctly asking… it should be
+  // asking the same for regular captions as well"): the same house confirm
+  // pattern as deletePage. Flushes that page's pending debounce first,
+  // clears the text optimistically, then PATCHes null (an explicit null
+  // CLEARS the server value).
   const deleteCaption = useCallback(async (pageId) => {
-    if (!selectedPages.some(x => x.id === pageId)) return
+    const page = selectedPages.find(x => x.id === pageId)
+    if (!page) return false
+    const ok = window.confirm(
+      `Delete the caption on page ${page.page_number}?\nThis cannot be undone.`,
+    )
+    if (!ok) return false
     const timers = captionTimers.current
     if (timers[pageId]) { clearTimeout(timers[pageId]); delete timers[pageId] }
     setPages(prev => prev.map(x => (x.id === pageId ? { ...x, caption: null } : x)))
     setCaptionEditId(null)
     await saveCaption(pageId, null)
+    return true
   }, [selectedPages, saveCaption, setPages, setCaptionEditId])
 
-  // "Left/Right +" around the active preview page: insert a BLANK
-  // caption-only page before/after it. Flow: POST the row (no file_path),
-  // then persist the NEW ORDER through the one order-persistence point
-  // (reorder() — it needs the comic's COMPLETE page set). On a reorder
-  // failure the already-created row is kept locally (server truth) so the
-  // two never drift — the owner can retry or delete it.
-  const insertCaptionPage = useCallback(async (side, pageId) => {
-    if (selectedId === null) { setError('Select a comic first.'); return }
-    // B18 round 2, substep 13 — the '+' now targets the page it sits on (ANY
-    // page, not just the active one); the active-page fallback keeps the old
-    // call shape working.
-    const pid = pageId != null ? pageId : activePageId
-    if (pid == null) { setError('Select a page first.'); return }
-    if (reorderingRef.current) return
+  // B18 round 3, pt 5/15 — insert a BLANK caption-only page at ANY slot
+  // (index 0..N into the comic's page list; N = the end). Generalizes round
+  // 2's before/after (slot = idx | idx + 1). Flow unchanged: POST the row
+  // (no file_path), then persist the NEW ORDER through the one
+  // order-persistence point (reorder() — it needs the comic's COMPLETE page
+  // set). On a reorder failure the already-created row is kept locally
+  // (server truth) so the two never drift — the owner can retry or delete
+  // it. `srcPageId`/`srcText` optionally CARRY a source caption's text into
+  // the new page (a bar dropped on a gap → the bar is cleared afterwards);
+  // the destination is saved BEFORE the source is cleared so a failure can
+  // never lose the text.
+  const insertCaptionPageAt = useCallback(async (slot, srcPageId = null, srcText = null) => {
+    if (selectedId === null) { setError('Select a comic first.'); return null }
+    if (reorderingRef.current) return null
     const mine = selectedPages
-    const idx = mine.findIndex(p => p.id === pid)
-    if (idx === -1) { setError('Select a page first.'); return }
     const nextNumber = mine.reduce((m, p) => Math.max(m, Number(p.page_number) || 0), 0) + 1
     let newPage = null
     try {
@@ -1476,50 +1759,202 @@ export default function ComicEditor({
       newPage = { id: created.id, comic_id: selectedId, page_number: nextNumber, file_path: null, caption: null, caption_position: 'page' }
     } catch (err) {
       setError(err.message)
-      return
+      return null
     }
     // New order: the comic's complete page set with the caption page spliced
-    // before/after the active one. reorder() renumbers 1..n + PATCHes it.
+    // at the clamped slot. reorder() renumbers 1..n + PATCHes it.
+    const at = Math.max(0, Math.min(Number.isFinite(Number(slot)) ? Number(slot) : 0, mine.length))
     const ordered = [...mine]
-    ordered.splice(side === 'before' ? idx : idx + 1, 0, newPage)
+    ordered.splice(at, 0, newPage)
     await reorder(ordered)
     // reorder() rolled back (its snapshot pre-dates the new row) → restore the
     // row locally; it exists on the server (the POST succeeded).
     setPages(prev => (prev.some(p => p.id === newPage.id) ? prev : [...prev, { ...newPage }]))
+    // Optional carry-over: the source bar's text MOVES into the new page, then
+    // the bar is cleared (its timer flushed first — the house pattern).
+    if (srcPageId != null && String(srcText ?? '').trim() !== '') {
+      const ok = await saveCaption(newPage.id, srcText)
+      if (ok) {
+        const timers = captionTimers.current
+        if (timers[srcPageId]) { clearTimeout(timers[srcPageId]); delete timers[srcPageId] }
+        setPages(prev => prev.map(x => (x.id === srcPageId ? { ...x, caption: null } : x)))
+        await saveCaption(srcPageId, null)
+        setNotice('Caption moved to a new caption page.')
+      }
+    }
     // The new caption page becomes active + selected. scrollActiveRef lets the
     // existing post-render effect (the one user clicks use) centre it — no
     // manual scroll, no double scroll.
     scrollActiveRef.current = true
     setActivePageId(newPage.id)
     setSelectedIds([newPage.id])
-  }, [selectedId, activePageId, selectedPages, csrfToken, reorder, setError, setActivePageId, setSelectedIds, scrollActiveRef, reorderingRef])
+    return newPage
+  }, [selectedId, selectedPages, csrfToken, reorder, setError, setPages, setNotice, saveCaption, setActivePageId, setSelectedIds, scrollActiveRef, reorderingRef, captionTimers])
 
-  // "Merge" on a caption-only page: fold its text into the NEAREST image page
-  // (the closest one before it, else the closest one after) and delete the
-  // page. The image page keeps its own top/bottom position.
+  // Round 2's before/after entry point (the four '+' buttons): the slot is
+  // the target page's index, or index + 1.
+  const insertCaptionPage = useCallback(async (side, pageId) => {
+    // B18 round 2, substep 13 — the '+' targets the page it sits on (ANY
+    // page, not just the active one); the active-page fallback keeps the old
+    // call shape working.
+    const pid = pageId != null ? pageId : activePageId
+    if (pid == null) { setError('Select a page first.'); return null }
+    const idx = selectedPages.findIndex(p => p.id === pid)
+    if (idx === -1) { setError('Select a page first.'); return null }
+    return insertCaptionPageAt(side === 'before' ? idx : idx + 1)
+  }, [activePageId, selectedPages, setError, insertCaptionPageAt])
+
+  // B18 round 3, pt 5 — the CAPTION-drop applier (the one function every
+  // caption drop funnels into, so the cue and the result can't disagree):
+  //   • { pageId, pos }  — a page's top/bottom half → that caption slot. The
+  //     destination's existing caption (if any) and the dragged one MERGE
+  //     (source on TOP, one line break — pt 4); the slot's position flips
+  //     to `pos`. Then the source: a bar is cleared (its text moved), a
+  //     caption page is deleted (no second confirm — the drop is the
+  //     explicit act; pt 5: "…then you can delete the dragged page").
+  //   • { pageId, merge }— onto a caption/caption page → merge there (same
+  //     join, pt 4) + delete/clear the source. Dropping a page onto ITSELF
+  //     is a no-op.
+  //   • { slot }         — a gap in the GRID: a bar becomes a caption page
+  //     AT that slot (carrying its text — insertCaptionPageAt), a caption
+  //     page MOVES there (reorder; no-op when it is already at / directly
+  //     before that slot).
+  //   • { slotVisible }  — a gap in the PREVIEW: same as { slot } but the
+  //     index is into the VISIBLE list → normalized onto the comic's page
+  //     list here (the way onSectionDrop does).
+  const applyCaptionDrop = useCallback(async (src, target) => {
+    const pages = selectedPagesRef.current
+    const srcPage = pages.find(p => p.id === src.pageId)
+    if (!srcPage) return
+    const srcText = String(src.text ?? '').trim()
+
+    // --- { slotVisible } → { slot } (normalize onto the full list) ---------
+    if (target.slotVisible != null && target.slot == null) {
+      const visible = visiblePagesRef.current
+      const slot = target.slotVisible >= visible.length
+        ? pages.length
+        : (() => { const i = pages.findIndex(p => p.id === visible[target.slotVisible].id); return i === -1 ? pages.length : i })()
+      target = { slot }
+    }
+
+    // --- MERGE onto a caption/caption page ---------------------------------
+    if (target.pageId != null && target.merge) {
+      const dst = pages.find(p => p.id === target.pageId)
+      if (!dst || dst.id === srcPage.id) return               // onto itself → no-op
+      const dstText = String(dst.caption || '').trim()
+      const merged = [srcText, dstText].filter(Boolean).join('\n')
+      if (merged !== (dst.caption ?? null)) {
+        flushCaptionTimer(dst.id)
+        flushCaptionTimer(srcPage.id)
+        const ok = await saveCaption(dst.id, merged)
+        if (!ok) { setError('The merged caption could not be saved — nothing was moved.'); return }
+        setPages(prev => prev.map(p => (p.id === dst.id ? { ...p, caption: merged } : p)))
+      }
+      if (src.kind === 'bar') {
+        const timers = captionTimers.current
+        if (timers[srcPage.id]) { clearTimeout(timers[srcPage.id]); delete timers[srcPage.id] }
+        setPages(prev => prev.map(p => (p.id === srcPage.id ? { ...p, caption: null } : p)))
+        setCaptionEditId(prev => (prev === srcPage.id ? null : prev))
+        await saveCaption(srcPage.id, null)
+      } else {
+        await deletePage(srcPage.id, { skipConfirm: true })
+      }
+      setNotice('Captions merged.')
+      return
+    }
+
+    // --- A PAGE HALF (top/bottom caption slot) ------------------------------
+    if (target.pageId != null && target.pos) {
+      const dst = pages.find(p => p.id === target.pageId)
+      if (!dst) return
+      const samePage = dst.id === srcPage.id
+      if (samePage && src.kind === 'page') return             // a page onto its own half → no-op
+      // The slot receives the text: MERGE if it already has some (pt 4,
+      // source on top, one line break), otherwise just place it.
+      if (srcText !== '') {
+        const dstText = samePage ? '' : String(dst.caption || '').trim()
+        const merged = samePage ? srcText : [srcText, dstText].filter(Boolean).join('\n')
+        if (merged !== (dst.caption ?? null)) {
+          flushCaptionTimer(dst.id)
+          if (!samePage) flushCaptionTimer(srcPage.id)
+          const ok = await saveCaption(dst.id, merged)
+          if (!ok) { setError('The caption could not be saved — nothing was moved.'); return }
+          setPages(prev => prev.map(p => (p.id === dst.id ? { ...p, caption: merged } : p)))
+        }
+      }
+      // The slot's position flips to the half dropped on (top ↔ bottom).
+      if ((dst.caption_position || 'top') !== target.pos) {
+        await setCaptionPosition(dst.id, target.pos)
+      }
+      // Now the source (only when it is a DIFFERENT page — for samePage the
+      // text is already the destination's; clearing it would wipe the result):
+      // a bar's text moved (or was merged in) → clear it; a caption page is
+      // consumed → delete it (the drop is the explicit act).
+      if (samePage) return
+      if (src.kind === 'bar') {
+        const timers = captionTimers.current
+        if (timers[srcPage.id]) { clearTimeout(timers[srcPage.id]); delete timers[srcPage.id] }
+        setPages(prev => prev.map(p => (p.id === srcPage.id ? { ...p, caption: null } : p)))
+        setCaptionEditId(prev => (prev === srcPage.id ? null : prev))
+        await saveCaption(srcPage.id, null)
+      } else {
+        await deletePage(srcPage.id, { skipConfirm: true })
+      }
+      return
+    }
+
+    // --- A GAP (grid slot, or preview slot normalized above) ----------------
+    if (target.slot != null) {
+      if (src.kind === 'bar') {
+        // A bar becomes a caption page AT that slot (carrying its text).
+        if (captionEditId === srcPage.id) setCaptionEditId(null)
+        await insertCaptionPageAt(target.slot, srcPage.id, srcText)
+        return
+      }
+      // A caption page MOVES to that slot (reorder — the one persistence
+      // point). No-op when it is already at that slot or directly before it.
+      const cur = pages.findIndex(p => p.id === srcPage.id)
+      if (cur === -1) return
+      if (target.slot === cur || target.slot === cur + 1) return
+      if (reorderingRef.current) return
+      const ordered = pages.filter(p => p.id !== srcPage.id)
+      const at = target.slot > cur ? target.slot - 1 : target.slot
+      ordered.splice(Math.max(0, Math.min(at, ordered.length)), 0, pages[cur])
+      await reorder(ordered)
+      return
+    }
+  }, [selectedPagesRef, visiblePagesRef, flushCaptionTimer, saveCaption, setCaptionPosition, setPages, setCaptionEditId, deletePage, insertCaptionPageAt, reorder, reorderingRef, setError, setNotice, captionTimers, captionEditId])
+
+  // Bind the ref the drop handlers read (they're declared above, this below —
+  // see the applyCaptionDropRef declaration). Runs every render.
+  useEffect(() => { applyCaptionDropRef.current = applyCaptionDrop }, [applyCaptionDrop])
+
+  // B18 round 3, pts 4/5 — "Merge" on a caption-only page: fold its text
+  // into the NEAREST CAPTION PAGE (the closest one before it, else the
+  // closest one after — `nearestCaptionPage`). NEVER into an actual page
+  // (the owner: "honestly think there shouldn't be an option to merge a
+  // caption page with an actual page below it" — round 2's image-page
+  // target is superseded; the button is disabled when there is no caption
+  // page neighbour). The SOURCE text is the upper part, the destination's
+  // text the lower part, one line break between (pt 4: "…with a line break
+  // between them"); the destination keeps its format/position; the source
+  // page is deleted after the save succeeds.
   const mergeCaptionPage = useCallback(async (pageId) => {
     const mine = selectedPages
     const idx = mine.findIndex(p => p.id === pageId)
     if (idx === -1) return
-    let target = null
-    for (let i = idx - 1; i >= 0; i--) { if (mine[i].file_path) { target = mine[i]; break } }
-    if (!target) for (let i = idx + 1; i < mine.length; i++) { if (mine[i].file_path) { target = mine[i]; break } }
-    if (!target) { setError('No adjacent image page to merge into.'); return }
-    const base = String(target.caption || '').trim()
-    const extra = String(mine[idx].caption || '').trim()
-    // B18 round 2, substep 9 — merge keeps BOTH texts, separated by a blank
-    // line (the owner's review: "the other text is lost").
-    const merged = [base, extra].filter(Boolean).join('\n\n')
-    if (merged !== (target.caption ?? null)) {
-      // Substep 9 bug fix — FLUSH the pending debounced caption saves on
-      // BOTH pages before the programmatic save: a stale timer armed by
-      // typing into the target (or the caption page) would otherwise fire
-      // AFTER the merge's PATCH and overwrite the merged text — the
-      // owner-reproduced loss (2026-10-02).
-      const timers = captionTimers.current
-      for (const id of [target.id, pageId]) {
-        if (timers[id]) { clearTimeout(timers[id]); delete timers[id] }
-      }
+    const target = nearestCaptionPage(mine, pageId)
+    if (!target) { setError('No adjacent caption page to merge into.'); return }
+    const srcText = String(mine[idx].caption || '').trim()
+    const dstText = String(target.caption || '').trim()
+    const merged = [srcText, dstText].filter(Boolean).join('\n')
+    const changed = merged !== (target.caption ?? null)
+    if (changed) {
+      // Flush the pending debounced caption saves on BOTH pages first (the
+      // round-2 substep-9 pattern): a stale timer armed by typing would
+      // otherwise fire AFTER the merge's PATCH and overwrite the merged text.
+      flushCaptionTimer(target.id)
+      flushCaptionTimer(pageId)
       const ok = await saveCaption(target.id, merged)
       if (!ok) {
         // The save FAILED — the caption page is KEPT (deleting it would lose
@@ -1528,11 +1963,19 @@ export default function ComicEditor({
         return
       }
       // saveCaption PATCHes the server; mirror the merged text locally so
-      // the target's bar shows it before the splice below.
+      // the target's box shows it before the splice below.
       setPages(prev => prev.map(p2 => (p2.id === target.id ? { ...p2, caption: merged } : p2)))
     }
-    await deletePage(pageId)                       // the server renumbers 1..N
-  }, [selectedPages, saveCaption, deletePage, setError, setPages])
+    // The source page is deleted (the house confirm still applies — page
+    // deletes always ask). If the owner cancels it, the merge stands (the
+    // destination has the text) and the source stays too — say so, so the
+    // duplicate is understood, not "stuck".
+    if (captionEditId === pageId) setCaptionEditId(null)
+    const deleted = await deletePage(pageId)       // the server renumbers 1..N
+    if (!deleted && changed) {
+      setError(`The caption was merged into page ${target.page_number} — the caption page was kept (its delete was cancelled). Delete it from its bin if you want it gone.`)
+    }
+  }, [selectedPages, nearestCaptionPage, flushCaptionTimer, saveCaption, deletePage, setError, setPages, captionEditId, setCaptionEditId])
 
   // B2.5 Step 15 (folded into B18), reworked in B18 round 2 substep 7: the
   // per-comic theme colour. The <input type="color"> fires an `input` event
@@ -1848,24 +2291,29 @@ export default function ComicEditor({
                 onChange={e => setThemeColour(e.target.value)}
               />
               {/* B18 round 2, substep 8 — one-click screen pick (the
-                  EyeDropper API, Chrome/Edge 105+). Feature-detected: the
-                  button simply does not exist in browsers without it.
-                  Cancelling the picker throws — swallow it. */}
-              {'EyeDropper' in window && (
-                <button
-                  type="button"
-                  className="theme-dropper"
-                  title="Pick a colour from anywhere on screen"
-                  onClick={async () => {
-                    try {
-                      const res = await new window.EyeDropper().open()
-                      setThemeColour(res.sRGBHex)
-                    } catch { /* the user cancelled the picker */ }
-                  }}
-                >
-                  Eyedropper
-                </button>
-              )}
+                  EyeDropper API, Chrome/Edge 105+). B18 round 3, pt 11 —
+                  the owner "don't see [it] anywhere": the API is feature-
+                  detected, so in a browser without it the button VANISHED
+                  with no hint. Now it is ALWAYS rendered: disabled (with an
+                  explanatory title) where the API is absent, working
+                  elsewhere. Cancelling the picker throws — swallow it. */}
+              <button
+                type="button"
+                className="theme-dropper"
+                title={'EyeDropper' in window
+                  ? 'Pick a colour from anywhere on screen'
+                  : 'Not available in this browser (the EyeDropper API is missing) — use the colour field'}
+                disabled={!('EyeDropper' in window)}
+                onClick={async () => {
+                  if (!('EyeDropper' in window)) return
+                  try {
+                    const res = await new window.EyeDropper().open()
+                    setThemeColour(res.sRGBHex)
+                  } catch { /* the user cancelled the picker */ }
+                }}
+              >
+                Eyedropper
+              </button>
               <button
                 type="button"
                 className="theme-clear"
@@ -1959,7 +2407,20 @@ export default function ComicEditor({
             </h3>
 
             {selectedPages.length === 0 ? (
-              <p className="muted">No pages yet.</p>
+              /* B18 round 3, pt 15 — the FAKE caption page in the position
+                 of the FIRST TILE (a real grid cell, so it sits exactly
+                 where page 1 would): theme red (var(--accent)), white
+                 italic "Disrupt the narrative…", the '+' centred below.
+                 Click → a real caption page of the DEFAULT colour at slot 0.
+                 Vanishes the moment any page exists (this conditional). */
+              <ul
+                className={'page-grid page-grid--' + zoomRegime}
+                style={zoomRegime === 'grid' ? { '--tile': tilePx + 'px' } : undefined}
+              >
+                <li className={'page-tile fake-tile' + (zoomRegime === 'list' ? ' fake-tile--list' : '')}>
+                  <FakeCaptionPage onAdd={() => insertCaptionPageAt(0)} />
+                </li>
+              </ul>
             ) : (
               <ul
                 ref={gridRef}
@@ -2002,6 +2463,15 @@ export default function ComicEditor({
                           // lights this row's bottom + the next row's top.
                           + (gridDropSlot === i ? ' page-list-item--drop-edge-top' : '')
                           + (gridDropSlot === i + 1 ? ' page-list-item--drop-edge-bottom' : '')
+                          // B18 round 3, pt 5 — the CAPTION-drag cue (red =
+                          // a caption lands here; the white edges = a page
+                          // lands there): the half edge, the merge ring, or
+                          // the gap edges.
+                          + (capDrop && capDrop.pageId === p.id && capDrop.pos === 'top' ? ' page-list-item--cap-edge-top' : '')
+                          + (capDrop && capDrop.pageId === p.id && capDrop.pos === 'bottom' ? ' page-list-item--cap-edge-bottom' : '')
+                          + (capDrop && capDrop.pageId === p.id && capDrop.merge ? ' page-list-item--cap-merge' : '')
+                          + (capDrop && capDrop.slot === i ? ' page-list-item--cap-edge-top' : '')
+                          + (capDrop && capDrop.slot === i + 1 ? ' page-list-item--cap-edge-bottom' : '')
                         }
                         title={`${fileNameOf(p.file_path)} — click to activate · Ctrl+click to multi-select · arrows to move · Shift+arrow to extend · Shift+click to range-select · drag to reorder`}
                         draggable
@@ -2045,6 +2515,15 @@ export default function ComicEditor({
                         // rows in a wrapped grid (it marks the page-order gap).
                         + (gridDropSlot === i ? ' page-tile--drop-edge-left' : '')
                         + (gridDropSlot === i + 1 ? ' page-tile--drop-edge-right' : '')
+                        // B18 round 3, pt 5 — the CAPTION-drag cue (red = a
+                        // caption lands here; the white edges = a page lands
+                        // there): the half edge, the merge ring, or the gap
+                        // edges (left/right in the tile grid).
+                        + (capDrop && capDrop.pageId === p.id && capDrop.pos === 'top' ? ' page-tile--cap-edge-top' : '')
+                        + (capDrop && capDrop.pageId === p.id && capDrop.pos === 'bottom' ? ' page-tile--cap-edge-bottom' : '')
+                        + (capDrop && capDrop.pageId === p.id && capDrop.merge ? ' page-tile--cap-merge' : '')
+                        + (capDrop && capDrop.slot === i ? ' page-tile--cap-edge-left' : '')
+                        + (capDrop && capDrop.slot === i + 1 ? ' page-tile--cap-edge-right' : '')
                       }
                       draggable
                       title={`${fileNameOf(p.file_path)} — click to activate · Ctrl+click to multi-select · arrows to move (grid) · Shift+arrow to extend · drag to reorder · drag a selected page to move the whole selection`}
@@ -2130,7 +2609,14 @@ export default function ComicEditor({
             ) : null}
           </h3>
           {selectedPages.length === 0 ? (
-            <p className="muted">No pages yet.</p>
+            /* B18 round 3, pt 15 — the FAKE caption page ON THE PREVIEW
+               PLANE (same component as the first-tile one): theme red,
+               white italic "Disrupt the narrative…", the '+' centred below.
+               Click → a real caption page of the DEFAULT colour at slot 0.
+               Vanishes the moment any page exists (this conditional). */
+            <div className="comic-preview comic-preview--empty">
+              <FakeCaptionPage onAdd={() => insertCaptionPageAt(0)} />
+            </div>
           ) : (
             <div
               className="comic-preview"
@@ -2171,6 +2657,16 @@ export default function ComicEditor({
                       + (showBefore ? ' preview-figure--drop-before' : '')
                       + (showAfter ? ' preview-figure--drop-after' : '')
                       + (!p.file_path ? ' preview-figure--caption' : '')
+                      // B18 round 3, pt 5 — the CAPTION-drag cue (red = a
+                      // caption lands here; white = a page lands there): the
+                      // half edge (top/bottom caption), the merge ring
+                      // (onto a caption page), or the gap edges (a caption
+                      // page lands between figures).
+                      + (capDrop && capDrop.pageId === p.id && capDrop.pos === 'top' ? ' preview-figure--cap-top' : '')
+                      + (capDrop && capDrop.pageId === p.id && capDrop.pos === 'bottom' ? ' preview-figure--cap-bottom' : '')
+                      + (capDrop && capDrop.pageId === p.id && capDrop.merge ? ' preview-figure--cap-merge' : '')
+                      + (capDrop && capDrop.slotVisible === i ? ' preview-figure--cap-before' : '')
+                      + (capDrop && capDrop.slotVisible === i + 1 ? ' preview-figure--cap-after' : '')
                     }
                     title="Click to make this the active page · Ctrl+click to multi-select · Up/Down = the adjacent page · Shift+Up/Down to extend · drag to reorder · drag a selected page to move the whole selection"
                     onClick={e => onListRowClick(e, p.id, 'preview')}
@@ -2285,6 +2781,18 @@ export default function ComicEditor({
                                     placeholder="Caption page…"
                                     aria-label={`Caption page ${p.page_number}`}
                                     onChange={e => onCaptionChange(p, e.target.value)}
+                                    // B18 round 3, pt 12 — Enter COMMITS +
+                                    // closes the caption; Ctrl/⌘+Enter = a
+                                    // line break (the old Enter-newline was
+                                    // the multi-line story the owner cut).
+                                    onKeyDown={e => onCaptionKeyDown(e, p)}
+                                    // B18 round 3, pt 8 — a click in the TEXT
+                                    // goes to the caret, not to the figure's
+                                    // activate+scroll (onListRowClick would
+                                    // centre the page and fight the caret).
+                                    // The textarea fills the frame, so every
+                                    // in-frame click lands here.
+                                    onClick={e => e.stopPropagation()}
                                     onBlur={disarmUnlessInside}
                                   />
                                 </div>
@@ -2292,9 +2800,14 @@ export default function ComicEditor({
                                   <button
                                     type="button"
                                     className="cap-merge"
-                                    title="Merge this caption into the nearest image page"
-                                    aria-label="Merge this caption into the nearest image page"
-                                    disabled={deleting || !hasImageNeighbor(selectedPages, p.id)}
+                                    // B18 round 3, pts 4/5 — merge now folds
+                                    // into the nearest CAPTION PAGE (never an
+                                    // image page — the owner), source text on
+                                    // top, one line break between; disabled
+                                    // when there is no caption-page neighbour.
+                                    title="Merge this caption into the nearest caption page (this text on top)"
+                                    aria-label="Merge this caption into the nearest caption page"
+                                    disabled={deleting || !hasCaptionPageNeighbor(selectedPages, p.id)}
                                     onClick={e => { e.stopPropagation(); mergeCaptionPage(p.id) }}
                                   >
                                     Merge
@@ -2303,10 +2816,23 @@ export default function ComicEditor({
                                 </div>
                               </>
                             ) : (
+                              // B18 round 3, pt 5 — the read-only caption page
+                              // is DRAGGABLE (its own drag — pt 2: never the
+                              // whole page; the [data-caption-drag] guard +
+                              // stopPropagation keep the figure out). Drop
+                              // targets: a page half, a caption page (merge),
+                              // a gap (move). The fading cue marks the source.
                               <div
-                                className="caption-page-frame caption-page-frame--bar"
+                                className={
+                                  'caption-page-frame caption-page-frame--bar'
+                                  + (capDragPageId === p.id ? ' caption-node--dragging' : '')
+                                }
                                 style={capStyle}
-                                title="Click to edit the caption page"
+                                title="Click to edit the caption page · drag it to a page half, onto a caption page (merge), or to a gap (move)"
+                                draggable
+                                data-caption-drag="page"
+                                onDragStart={e => startCaptionDrag(e, 'page', p)}
+                                onDragEnd={endCaptionDrag}
                                 onClick={e => { e.stopPropagation(); setCaptionEditId(p.id) }}
                               >
                                 <span className="caption-page-caption">{p.caption || 'Caption page'}</span>
@@ -2322,26 +2848,47 @@ export default function ComicEditor({
                               disabled={deleting}
                               onClick={e => { e.stopPropagation(); deleteCaption(p.id) }}
                             />
-                            <input
-                              type="text"
+                            {/* B18 round 3, pt 12 — the bar's editor is now a
+                                TEXTAREA (multi-line with Ctrl/⌘+Enter, Enter
+                                commits + closes — the same keys as the
+                                caption page). It starts as one line (the
+                                CSS min-height) and grows with the text. */}
+                            <textarea
                               className="caption-input"
                               style={capStyle}
+                              rows={1}
                               autoFocus
                               value={p.caption ?? ''}
                               placeholder="Caption…"
                               aria-label={`Caption for page ${p.page_number}`}
                               onChange={e => onCaptionChange(p, e.target.value)}
+                              onKeyDown={e => onCaptionKeyDown(e, p)}
+                              onClick={e => e.stopPropagation()}
                               onBlur={disarmUnlessInside}
                             />
                             {captionSave === 'error' ? <span className="caption-status error">{captionError}</span> : null}
                           </div>
                         )
                       } else if (hasCaption) {
+                        // B18 round 3, pt 5 — the read-only bar is DRAGGABLE
+                        // (its own drag — pt 2: never the whole page; the
+                        // [data-caption-drag] guard + stopPropagation keep the
+                        // figure/row out). Drop targets: a page half (the text
+                        // goes there), a caption page (merge), a gap (it
+                        // becomes a caption page there). The fading cue marks
+                        // the source.
                         captionNode = (
                           <div
-                            className="cap-bar cap-bar--bar"
+                            className={
+                              'cap-bar cap-bar--bar'
+                              + (capDragPageId === p.id ? ' caption-node--dragging' : '')
+                            }
                             style={capStyle}
-                            title="Click to edit the caption"
+                            title="Click to edit the caption · drag it to a page half, onto a caption page (merge), or to a gap (it becomes a caption page)"
+                            draggable
+                            data-caption-drag="bar"
+                            onDragStart={e => startCaptionDrag(e, 'bar', p)}
+                            onDragEnd={endCaptionDrag}
                             onClick={e => { e.stopPropagation(); setCaptionEditId(p.id) }}
                           >
                             <PageBin
