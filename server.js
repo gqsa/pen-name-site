@@ -450,6 +450,43 @@ for (const [table, col, type] of [
     db.exec(`ALTER TABLE comics ADD COLUMN theme_colour TEXT`);
 }
 
+// B18 round 4 — DUAL caption slots: a media (image) page may carry a TOP and a
+// BOTTOM caption AT THE SAME TIME (owner: "the page should then have a caption
+// at the top and bottom at the same time"). Two new TEXT columns (the same
+// PRAGMA-guarded ADD COLUMN pattern as caption_position), plus a ONE-TIME data
+// split: every media row whose legacy `caption` still holds text moves it to
+// the slot its `caption_position` names ('bottom' → caption_bottom, else →
+// caption_top) and clears `caption`. Caption-ONLY pages (file_path NULL) keep
+// using `caption` untouched — their text never lived in the slot columns.
+// Idempotent: once every legacy caption has moved, the COUNT finds nothing
+// and the UPDATEs never run again.
+{
+  const cpCols = db.prepare('PRAGMA table_info(comic_pages)').all().map(r => r.name);
+  if (!cpCols.includes('caption_top'))
+    db.exec(`ALTER TABLE comic_pages ADD COLUMN caption_top TEXT`);
+  if (!cpCols.includes('caption_bottom'))
+    db.exec(`ALTER TABLE comic_pages ADD COLUMN caption_bottom TEXT`);
+  const legacy = db.prepare(`
+    SELECT COUNT(*) AS n FROM comic_pages
+    WHERE file_path IS NOT NULL AND caption IS NOT NULL AND TRIM(caption) <> ''
+  `).get();
+  if (legacy && legacy.n > 0) {
+    // Two INDEPENDENT updates, each with its own explicit position filter
+    // (order-independent — the bottom one first, then everything else → top):
+    db.prepare(`
+      UPDATE comic_pages SET caption_bottom = caption, caption = NULL
+      WHERE file_path IS NOT NULL AND caption IS NOT NULL AND TRIM(caption) <> ''
+        AND COALESCE(caption_position, 'top') = 'bottom'
+    `).run();
+    db.prepare(`
+      UPDATE comic_pages SET caption_top = caption, caption = NULL
+      WHERE file_path IS NOT NULL AND caption IS NOT NULL AND TRIM(caption) <> ''
+        AND COALESCE(caption_position, 'top') <> 'bottom'
+    `).run();
+    console.log(`[B18 round 4] split ${legacy.n} legacy caption(s) into caption_top/caption_bottom`);
+  }
+}
+
 // B18 — comic_pages.file_path must become NULLABLE (a caption-only page has no
 // image). SQLite can't drop NOT NULL via ALTER, so this is a TABLE-REBUILD
 // migration: create-new / copy / drop / rename. It runs ONCE and is
@@ -463,7 +500,7 @@ for (const [table, col, type] of [
 {
   const cols = db.prepare('PRAGMA table_info(comic_pages)').all();
   const fp = cols.find(c => c.name === 'file_path');
-  const expected = ['id', 'comic_id', 'page_number', 'file_path', 'caption', 'caption_position'];
+  const expected = ['id', 'comic_id', 'page_number', 'file_path', 'caption', 'caption_position', 'caption_top', 'caption_bottom'];
   if (fp && fp.notnull === 1 && expected.every(n => cols.some(c => c.name === n))) {
     db.exec('PRAGMA foreign_keys=OFF');
     try {
@@ -476,10 +513,12 @@ for (const [table, col, type] of [
           file_path TEXT,                          -- B18: nullable (caption-only pages)
           caption TEXT,
           caption_position TEXT,
+          caption_top TEXT,                        -- B18 round 4: dual slots
+          caption_bottom TEXT,                     -- (top + bottom at the same time)
           UNIQUE (comic_id, page_number)
         )`);
-      db.exec(`INSERT INTO comic_pages_new (id, comic_id, page_number, file_path, caption, caption_position)
-               SELECT id, comic_id, page_number, file_path, caption, caption_position FROM comic_pages`);
+      db.exec(`INSERT INTO comic_pages_new (id, comic_id, page_number, file_path, caption, caption_position, caption_top, caption_bottom)
+               SELECT id, comic_id, page_number, file_path, caption, caption_position, caption_top, caption_bottom FROM comic_pages`);
       db.exec('DROP TABLE comic_pages');
       db.exec('ALTER TABLE comic_pages_new RENAME TO comic_pages');
       db.exec('COMMIT');
@@ -1420,6 +1459,19 @@ app.patch('/api/admin/comic-pages/:id', async (req, res) => {
   if (!row) return res.status(404).json({ error: 'Not found' });
   try {
     const b = await readJsonBody(req);
+    // B18 round 4 — SLOTTED captions (dual slots): an optional `slot`
+    // ('top' | 'bottom') routes the caption value into that media page's slot
+    // column — caption_top / caption_bottom — so one page can carry BOTH a top
+    // and a bottom caption at the same time. An explicit null CLEARS that
+    // slot (the other slot is untouched). `slot` ABSENT (or 'page') = the
+    // legacy contract below: the `caption` column, which caption-ONLY pages
+    // still use — unchanged for old clients.
+    if (b.slot === 'top' || b.slot === 'bottom') {
+      const col = b.slot === 'top' ? 'caption_top' : 'caption_bottom';
+      const next = b.caption === undefined ? row[col] : b.caption;
+      db.prepare(`UPDATE comic_pages SET ${col} = ? WHERE id = ?`).run(next, id);
+      return res.json({ success: true, id, slot: b.slot });
+    }
     // B18 — caption_position ('top' | 'bottom' | 'page'): ABSENT or an explicit
     // null keeps the row's current position; a valid value sets it; an UNKNOWN
     // value falls back to the current position (lenient — like this route's

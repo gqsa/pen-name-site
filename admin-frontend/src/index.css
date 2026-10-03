@@ -418,6 +418,15 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 }
 .cap-bar--bar .page-caption { margin: 0; }
 .cap-bar .caption-input { display: block; width: 100%; margin: 0 0 4px; }
+/* B18 round 4, pt 1 — the bar's RESTING form is a click-target (user-select:
+   none above), but the ARMED editor's textarea must take the caret and let
+   the owner select/edit the text — re-enable selection on the input itself
+   (and the caption-page's editor), overriding the inherited none. */
+.cap-bar .caption-input,
+.caption-page-frame .caption-page-input {
+  user-select: text;
+  -webkit-user-select: text;
+}
 .cap-bar .caption-status { margin: 4px 0 0; text-align: center; }
 /* the bar's hover bin overhangs its top-right corner */
 .cap-bar .page-bin { top: -9px; right: -9px; }
