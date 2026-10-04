@@ -487,6 +487,13 @@ export default function ComicEditor({
   // precedent). It is bound once, at render, to the latest callback.
   const applyCaptionDropRef = useRef(null)
 
+  // B18 round 7 — the document-level paste handler reads this ref (the house
+  // pattern, applyCaptionDropRef is the precedent): the real handler is
+  // declared AFTER insertCaptionPageAt/reorder/saveCaption/deletePage (which
+  // it calls), so it can't be a direct useCallback dep of the listener that's
+  // declared above. It is bound once, at render, to the latest callback.
+  const pasteHandlerRef = useRef(null)
+
   // Step 4 — caption auto-save state.
   const captionTimers = useRef({})                       // page id → pending debounce timeout (per page, so one page's timer can't clobber another's)
   const [captionSave, setCaptionSave] = useState(null)   // null | 'saving' | 'saved' | 'error'
@@ -880,26 +887,23 @@ export default function ComicEditor({
   // Attached to `document` (not the section): the dropzone is a plain <div>,
   // so clicking it leaves focus on <body> — a section-scoped onPaste would
   // never see a subsequent Ctrl+V. Document-level catches it no matter where
-  // focus is. Text pastes (e.g. into a caption input) are left alone: we only
-  // act when the paste actually carries an image file, otherwise we return
-  // without preventDefault so the default paste proceeds.
+  // focus is. B18 round 7 — the real handler (see below, after
+  // insertCaptionPageAt) now does three things: a TEXT paste (focus NOT in a
+  // text field) → a caption page with that text after the active page; an
+  // IMAGE/MEDIA paste → a media page placed after the active page; and an
+  // IMAGE paste with the caret inside a caption page's text → that caption
+  // page splits at the caret with the media BETWEEN the two halves. A text
+  // paste with focus in a text field is left to that field (no preventDefault).
+  //
+  // B18 round 7 — THIN WRAPPER (stable, deps [pasteHandlerRef]): dispatches to the real
+  // handler through pasteHandlerRef (bound at render to the latest callback,
+  // declared after insertCaptionPageAt — the house ref pattern). The listener
+  // below re-attaches only when this wrapper's identity changes (it never
+  // will), so the handler it calls is always the freshest one.
   const onPasteEvent = useCallback((e) => {
-    if (selectedId === null) return
-    if (uploadingRef.current) return
-    const items = (e.clipboardData && e.clipboardData.items)
-      ? Array.from(e.clipboardData.items)
-      : []
-    const files = []
-    for (let i = 0; i < items.length; i += 1) {
-      const it = items[i]
-      if (it.kind !== 'file') continue
-      const f = (typeof it.getAsFile === 'function') ? it.getAsFile() : null
-      if (f && (f.type || '').startsWith('image/')) files.push(f)
-    }
-    if (files.length === 0) return   // not an image paste → let it through (caption text, etc.)
-    e.preventDefault()
-    addFiles(files)
-  }, [selectedId, addFiles])
+    const handler = pasteHandlerRef.current
+    if (typeof handler === 'function') handler(e)
+  }, [pasteHandlerRef])
 
   // Register the document-level paste listener (re-attaches when the deps
   // change; the disposer removes it on unmount).
@@ -1890,6 +1894,230 @@ export default function ComicEditor({
     if (idx === -1) { setError('Select a page first.'); return null }
     return insertCaptionPageAt(side === 'before' ? idx : idx + 1)
   }, [activePageId, selectedPages, setError, insertCaptionPageAt])
+
+  // --- B18 round 7: paste from the clipboard (the real handler) ------------
+  //
+  // Wired to the document-level `paste` listener (onPasteEvent, above) through
+  // pasteHandlerRef — it's declared HERE (after insertCaptionPageAt / reorder /
+  // saveCaption / deletePage, which it calls) so the house ref pattern lets the
+  // early-declared listener reach it without a TDZ dep. Implements the three
+  // paste cases from editor-overhaul.md §10. The file-picker + drag-drop paths
+  // are UNCHANGED (append-at-end); only this paste path changes placement.
+  //
+  // Two small create-at-a-number primitives: the server enforces
+  // UNIQUE(comic_id, page_number) (a 409 aborts the create), and the split
+  // needs SEVERAL creates before a single reorder — so each create must take a
+  // fresh, caller-assigned number rather than insertCaptionPageAt's
+  // per-call max+1 (whose stale closure would collide on the second create).
+
+  // A BLANK caption-only page at a SPECIFIC page_number (POST + append locally,
+  // no reorder — the caller reorders once at the end).
+  const createCaptionPageAtNumber = useCallback(async (pageNumber) => {
+    if (selectedId === null) return null
+    try {
+      const res = await fetch('/api/admin/comic-pages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ comic_id: selectedId, page_number: pageNumber, caption_position: 'page' }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `create caption page answered ${res.status}`)
+      }
+      const created = await res.json().catch(() => ({}))
+      const row = { id: created.id, comic_id: selectedId, page_number: pageNumber, file_path: null, caption: null, caption_position: 'page' }
+      setPages(prev => [...prev, row])
+      return row
+    } catch (err) {
+      setError(err.message)
+      return null
+    }
+  }, [selectedId, csrfToken, setPages, setError])
+
+  // A MEDIA page (one uploaded image) at a SPECIFIC page_number.
+  const createMediaPageAt = useCallback(async (file, pageNumber) => {
+    if (selectedId === null) return null
+    try {
+      const up = await uploadImage(file, csrfToken)
+      const res = await fetch('/api/admin/comic-pages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ comic_id: selectedId, page_number: pageNumber, file_path: up.file_path }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `add media page answered ${res.status}`)
+      }
+      const created = await res.json()
+      const row = { id: created.id, comic_id: selectedId, page_number: pageNumber, file_path: up.file_path, caption: null }
+      setPages(prev => [...prev, row])
+      return row
+    } catch (err) {
+      setError(err.message)
+      return null
+    }
+  }, [selectedId, csrfToken, uploadImage, setPages, setError])
+
+  // The IMAGE/MEDIA paste (non-split): the addFiles pipeline (append-at-end) +
+  // a reorder to put the new page(s) AFTER THE ACTIVE PAGE. When there is no
+  // active page, or the active page is already the last, the append IS the
+  // target position — no reorder needed (the file-picker's behaviour).
+  const addPasteImageAfterActive = useCallback(async (files) => {
+    const original = selectedPagesRef.current   // the set BEFORE addFiles creates
+    const newPages = await addFiles(files)
+    if (!newPages || newPages.length === 0) return
+    const activeId = activePageIdRef.current
+    const idx = (activeId != null) ? original.findIndex(p => p.id === activeId) : -1
+    // "After the active page" — when there's no active page, or the active page
+    // is already the last, the append-at-end addFiles did is exactly that.
+    if (idx !== -1 && idx + 1 < original.length) {
+      const newOrder = [...original.slice(0, idx + 1), ...newPages, ...original.slice(idx + 1)]
+      await reorder(newOrder)
+    }
+    scrollActiveRef.current = true
+    setActivePageId(newPages[0].id)
+    setSelectedIds([newPages[0].id])
+  }, [addFiles, reorder, activePageIdRef, selectedPagesRef, scrollActiveRef, setActivePageId, setSelectedIds])
+
+  const handlePaste = useCallback((e) => {
+    if (selectedId === null) return
+    if (uploadingRef.current || reorderingRef.current) return
+
+    const dt = (e && e.clipboardData) ? e.clipboardData : null
+    if (!dt) return
+    const items = Array.from(dt.items || [])
+    const files = []
+    for (let i = 0; i < items.length; i += 1) {
+      const it = items[i]
+      if (it.kind !== 'file') continue
+      const f = (typeof it.getAsFile === 'function') ? it.getAsFile() : null
+      if (f && (f.type || '').startsWith('image/')) files.push(f)
+    }
+    const text = (typeof dt.getData === 'function' ? dt.getData('text/plain') : '') || ''
+
+    // Empty clipboard (no image files, no text) → no-op, no error.
+    if (files.length === 0 && text.trim() === '') return
+
+    const activeEl = (typeof document !== 'undefined' && document.activeElement) || null
+    const isCapPageInput = (el) => (el instanceof HTMLElement && el.classList.contains('caption-page-input'))
+    const capInputEl = isCapPageInput(activeEl) ? activeEl : (e.target && isCapPageInput(e.target) ? e.target : null)
+    const inTextField = (activeEl instanceof HTMLTextAreaElement) || (activeEl instanceof HTMLInputElement)
+
+    // --- Case 3: IMAGE paste, caret inside a CAPTION PAGE's text → SPLIT ----
+    // A regular caption BAR never splits (it belongs to its image page) — only
+    // a caption PAGE's textarea (.caption-page-input) triggers the split.
+    if (files.length > 0 && capInputEl) {
+      e.preventDefault()
+      const attr = capInputEl.getAttribute('data-page-id')
+      let capPageId = (attr != null) ? Number(attr) : null
+      if (capPageId == null && captionEditId && captionEditId.endsWith(':page')) {
+        capPageId = Number(String(captionEditId).slice(0, -':page'.length))
+      }
+      if (capPageId == null) { setError('Paste target not found.'); return }
+      void (async () => {
+        // Flush any pending caption debounce on that page (house pattern) so a
+        // stale save can't race the split.
+        flushCaptionTimer(capPageId)
+        const capPage = selectedPagesRef.current.find(p => p.id === capPageId)
+        if (!capPage) return
+        const fullText = capPage.caption ?? ''
+        const caret = (capInputEl.selectionStart != null) ? capInputEl.selectionStart : fullText.length
+        const caretPos = Math.max(0, Math.min(caret, fullText.length))
+        const before = fullText.slice(0, caretPos)
+        const after = fullText.slice(caretPos)
+        const hasBefore = before.trim() !== ''
+        const hasAfter = after.trim() !== ''
+        if (!hasBefore && !hasAfter) {
+          // Empty caption — nothing to split; just add the media after the
+          // active page (the plain image-paste case).
+          await addPasteImageAfterActive(files)
+          return
+        }
+        // Fresh, collision-free numbers (UNIQUE(comic_id,page_number)).
+        const mine = selectedPagesRef.current
+        const n = mine.reduce((m, p) => Math.max(m, Number(p.page_number) || 0), 0)
+        const numMedia = n + 1
+        const numBefore = hasBefore ? n + 2 : null
+        const numAfter = hasAfter ? (numBefore != null ? n + 3 : n + 2) : null
+        // 1. The media page (upload + POST at a reserved number).
+        const mediaPage = await createMediaPageAt(files[0], numMedia)
+        if (!mediaPage) return
+        // 2. "before" caption page (created blank — the text is seeded below).
+        let beforePage = null
+        if (hasBefore) beforePage = await createCaptionPageAtNumber(numBefore)
+        // 3. "after" caption page (created blank — the text is seeded below).
+        let afterPage = null
+        if (hasAfter) afterPage = await createCaptionPageAtNumber(numAfter)
+        // 4. ONE reorder: the complete page set with the split in place, the
+        //    original caption page pushed to the end (deleted next). reorder()
+        //    needs the comic's COMPLETE set (the server 400s a partial list).
+        //    `mine` was captured BEFORE the creates above — deterministic, and
+        //    already the full original set (capPage is among it).
+        const capIdxNow = mine.findIndex(p => p.id === capPageId)
+        const newOrder = [
+          ...mine.slice(0, capIdxNow),
+          ...(beforePage ? [beforePage] : []),
+          mediaPage,
+          ...(afterPage ? [afterPage] : []),
+          ...mine.slice(capIdxNow + 1),
+          capPage,
+        ]
+        await reorder(newOrder)
+        // 5. Delete the original caption page (no confirm — its text is about
+        //    to be seeded onto the two new pages).
+        await deletePage(capPageId, { skipConfirm: true })
+        // 6. Seed the split texts (saveCaption persists but never touches the
+        //    local state — setPages it so the preview shows the text), then
+        //    persist. Done AFTER the reorder/delete so their setPages can't
+        //    clobber the seed.
+        if (beforePage) {
+          setPages(prev => prev.map(p => (p.id === beforePage.id ? { ...p, caption: before } : p)))
+          await saveCaption(beforePage.id, 'page', before)
+        }
+        if (afterPage) {
+          setPages(prev => prev.map(p => (p.id === afterPage.id ? { ...p, caption: after } : p)))
+          await saveCaption(afterPage.id, 'page', after)
+        }
+        // 7. The media page becomes active + centred.
+        scrollActiveRef.current = true
+        setActivePageId(mediaPage.id)
+        setSelectedIds([mediaPage.id])
+      })()
+      return
+    }
+
+    // --- Case 2: IMAGE/MEDIA paste (not in a caption page's text) -----------
+    if (files.length > 0) {
+      e.preventDefault()
+      void addPasteImageAfterActive(files)
+      return
+    }
+
+    // --- Case 1: TEXT paste --------------------------------------------------
+    // Focus in a text field → leave it native (the browser pastes into the
+    // field). Only when focus is NOT in a text field do we intercept.
+    if (inTextField) return
+    if (typeof e.preventDefault === 'function') e.preventDefault()
+    void (async () => {
+      const activeId = activePageIdRef.current
+      const mine = selectedPagesRef.current
+      const idx = (activeId != null) ? mine.findIndex(p => p.id === activeId) : -1
+      const slot = (idx === -1) ? mine.length : idx + 1
+      const newPage = await insertCaptionPageAt(slot)
+      if (newPage) {
+        // saveCaption persists but never touches the local state — setPages it
+        // so the preview shows the pasted text.
+        setPages(prev => prev.map(p => (p.id === newPage.id ? { ...p, caption: text } : p)))
+        await saveCaption(newPage.id, 'page', text)
+      }
+    })()
+  }, [selectedId, uploadingRef, reorderingRef, captionEditId, activePageIdRef, selectedPagesRef, scrollActiveRef,
+      createCaptionPageAtNumber, createMediaPageAt, addPasteImageAfterActive, insertCaptionPageAt,
+      saveCaption, deletePage, flushCaptionTimer, reorder, setPages, setActivePageId, setSelectedIds, setError])
+
+  // Bind the ref the paste listener reads (declared above, this below — the
+  // house pattern, applyCaptionDropRef is the precedent). Runs every render.
+  useEffect(() => { pasteHandlerRef.current = handlePaste }, [handlePaste])
 
   // B18 round 3, pt 5 — the CAPTION-drop applier (the one function every
   // caption drop funnels into, so the cue and the result can't disagree):
@@ -3150,6 +3378,9 @@ export default function ComicEditor({
                                 <div className="caption-page-frame">
                                   <textarea
                                     className="caption-page-input"
+                                    // B18 round 7 — the paste split reads this to
+                                    // know WHICH caption page is being edited.
+                                    data-page-id={p.id}
                                     style={capStyle}
                                     autoFocus
                                     value={p.caption ?? ''}

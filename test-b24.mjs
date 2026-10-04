@@ -421,14 +421,16 @@ async function main() {
           r5.status === 201 && (await content()).body.comics.find(x => x.id === b18Id)?.theme_colour === '#ff0000',
           `status ${r5.status}`);
 
-        // An IMAGE page: caption_position must default to 'top'.
+        // An IMAGE page: caption_position must default to 'top', and the
+        // round-4 dual-slot columns must exist and start NULL.
         r5 = await fetch(base + '/api/admin/comic-pages', {
           method: 'POST', headers: adminH,
           body: JSON.stringify({ comic_id: b18Id, page_number: 1, file_path: `/uploads/comics/${ts}/b18.png` }),
         });
         const b18img = (await content()).body.pages.find(x => x.comic_id === b18Id);
-        check('4v. POST image page → 201, caption_position defaults to "top"',
-          r5.status === 201 && b18img && b18img.caption_position === 'top',
+        check('4v. POST image page → 201, position "top", dual slots NULL',
+          r5.status === 201 && b18img && b18img.caption_position === 'top'
+          && b18img.caption_top === null && b18img.caption_bottom === null,
           `status ${r5.status} ${JSON.stringify(b18img)}`);
 
         // A CAPTION-ONLY page (position 'page', NO file_path).
@@ -457,19 +459,59 @@ async function main() {
         t5 = await r5.text();
         check('4z. POST top/bottom WITHOUT file_path → 400', r5.status === 400, `got ${r5.status} ${t5}`);
 
+        // ---- B18 round 4 — the DUAL-SLOT contract (one page, BOTH slots):
+        // `slot:'top'`/`'bottom'` routes the caption into caption_top /
+        // caption_bottom; an explicit null clears THAT slot only; `slot`
+        // absent = the legacy `caption` column (old clients keep working).
+        r5 = await fetch(base + `/api/admin/comic-pages/${b18img.id}`, {
+          method: 'PATCH', headers: adminH, body: JSON.stringify({ caption: 'TOP', slot: 'top' }),
+        });
+        check('4aa. PATCH {caption,slot:"top"} → 200 + writes caption_top',
+          r5.status === 200 && (await content()).body.pages.find(x => x.id === b18img.id)?.caption_top === 'TOP',
+          `status ${r5.status}`);
+        r5 = await fetch(base + `/api/admin/comic-pages/${b18img.id}`, {
+          method: 'PATCH', headers: adminH, body: JSON.stringify({ caption: 'BOT', slot: 'bottom' }),
+        });
+        const b18both = (await content()).body.pages.find(x => x.id === b18img.id);
+        check('4ab. slot:"bottom" → BOTH slots filled at the same time',
+          r5.status === 200 && b18both?.caption_top === 'TOP' && b18both?.caption_bottom === 'BOT',
+          JSON.stringify(b18both));
+        r5 = await fetch(base + `/api/admin/comic-pages/${b18img.id}`, {
+          method: 'PATCH', headers: adminH, body: JSON.stringify({ caption: null, slot: 'top' }),
+        });
+        const b18cleared = (await content()).body.pages.find(x => x.id === b18img.id);
+        check('4ac. explicit null + slot:"top" clears the top slot ONLY',
+          r5.status === 200 && b18cleared?.caption_top === null && b18cleared?.caption_bottom === 'BOT',
+          JSON.stringify(b18cleared));
+        // `slot` ABSENT = the legacy contract (the `caption` column) — old clients.
+        r5 = await fetch(base + `/api/admin/comic-pages/${b18img.id}`, {
+          method: 'PATCH', headers: adminH, body: JSON.stringify({ caption: 'LEG' }),
+        });
+        const b18legacy = (await content()).body.pages.find(x => x.id === b18img.id);
+        check('4ad. no `slot` → the legacy `caption` column (slots untouched)',
+          r5.status === 200 && b18legacy?.caption === 'LEG' && b18legacy?.caption_bottom === 'BOT',
+          JSON.stringify(b18legacy));
+        r5 = await fetch(base + `/api/admin/comic-pages/${b18img.id}`, {
+          method: 'PATCH', headers: adminH, body: JSON.stringify({ caption: null }),
+        });
+        const b18cleared2 = (await content()).body.pages.find(x => x.id === b18img.id);
+        check('4ae. legacy null clears the `caption` column (slots untouched)',
+          r5.status === 200 && b18cleared2?.caption === null && b18cleared2?.caption_bottom === 'BOT',
+          JSON.stringify(b18cleared2));
+
         // Flip the image page's position top → bottom → top.
         r5 = await fetch(base + `/api/admin/comic-pages/${b18img.id}`, {
           method: 'PATCH', headers: adminH, body: JSON.stringify({ caption_position: 'bottom' }),
         });
-        check('4aa. PATCH caption_position → "bottom" → 200', r5.status === 200, `status ${r5.status}`);
+        check('4af. PATCH caption_position → "bottom" → 200', r5.status === 200, `status ${r5.status}`);
         await r5.text();
-        check('4ab. the position persisted as "bottom"',
+        check('4ag. the position persisted as "bottom"',
           (await content()).body.pages.find(x => x.id === b18img.id)?.caption_position === 'bottom');
         r5 = await fetch(base + `/api/admin/comic-pages/${b18img.id}`, {
           method: 'PATCH', headers: adminH, body: JSON.stringify({ caption_position: 'top' }),
         });
         await r5.text();
-        check('4ac. flipped back to "top"',
+        check('4ah. flipped back to "top"',
           (await content()).body.pages.find(x => x.id === b18img.id)?.caption_position === 'top');
 
         // A PATCH that OMITS caption_position keeps the current one.
@@ -477,7 +519,7 @@ async function main() {
           method: 'PATCH', headers: adminH, body: JSON.stringify({ caption: 'kept' }),
         });
         await r5.text();
-        check('4ad. PATCH caption (no position) keeps "top" + sets the caption',
+        check('4ai. PATCH caption (no position) keeps "top" + sets the caption',
           (await content()).body.pages.find(x => x.id === b18img.id)?.caption_position === 'top' &&
           (await content()).body.pages.find(x => x.id === b18img.id)?.caption === 'kept');
 
@@ -486,29 +528,29 @@ async function main() {
         r5 = await fetch(base + `/api/admin/comics/${b18Id}`, {
           method: 'PUT', headers: adminH, body: JSON.stringify({ theme_colour: '#00ff00' }),
         });
-        check('4ae. PUT theme_colour → 200', r5.status === 200, `status ${r5.status}`);
+        check('4aj. PUT theme_colour → 200', r5.status === 200, `status ${r5.status}`);
         await r5.text();
-        check('4af. the colour updated to #00ff00',
+        check('4ak. the colour updated to #00ff00',
           (await content()).body.comics.find(x => x.id === b18Id)?.theme_colour === '#00ff00');
         r5 = await fetch(base + `/api/admin/comics/${b18Id}`, {
           method: 'PUT', headers: adminH, body: JSON.stringify({ theme_colour: null }),
         });
         await r5.text();
-        check('4ag. PUT theme_colour: null CLEARS it (back to NULL)',
+        check('4al. PUT theme_colour: null CLEARS it (back to NULL)',
           (await content()).body.comics.find(x => x.id === b18Id)?.theme_colour === null);
         r5 = await fetch(base + `/api/admin/comics/${b18Id}`, {
           method: 'PUT', headers: adminH, body: JSON.stringify({ title: `B24 b18 comic ${ts} (renamed)` }),
         });
         await r5.text();
-        check('4ah. PUT without theme_colour keeps the value + updates the title',
+        check('4am. PUT without theme_colour keeps the value + updates the title',
           (await content()).body.comics.find(x => x.id === b18Id)?.theme_colour === null &&
           (await content()).body.comics.find(x => x.id === b18Id)?.title === `B24 b18 comic ${ts} (renamed)`);
 
-        // Cleanup — the B18 comic (cascades its two pages). Net DB change: zero.
+        // Cleanup — the B18 comic (cascades its pages). Net DB change: zero.
         r5 = await fetch(base + `/api/admin/comics/${b18Id}`, { method: 'DELETE', headers: adminGet });
-        check('4ai. cleanup: DELETE the B18 comic → 200', r5.status === 200, `status ${r5.status}`);
+        check('4an. cleanup: DELETE the B18 comic → 200', r5.status === 200, `status ${r5.status}`);
         await r5.text();
-        check('4aj. the B18 comic + its pages are gone (net-zero)',
+        check('4ao. the B18 comic + its pages are gone (net-zero)',
           !(await content()).body.comics.find(x => x.id === b18Id) &&
           (await content()).body.pages.filter(x => x.comic_id === b18Id).length === 0);
       }
