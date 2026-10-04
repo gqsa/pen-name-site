@@ -196,66 +196,13 @@ const DEFAULT_CAPTION_BG = (() => {
 // 'page' (or anything else) → caption (caption-ONLY pages).
 const slotOf = (slot) => (slot === 'top' ? 'caption_top' : slot === 'bottom' ? 'caption_bottom' : 'caption')
 
-// B18 round 4, pt 5 — SCREEN-PICK fallback for browsers without the EyeDropper
-// API (the owner's browser lacked it, so the eyedropper button was always
-// greyed out). It captures the screen via getDisplayMedia and shows the live
-// capture in a full-screen overlay; a click samples the pixel under the
-// cursor (the frame is drawn object-fit:cover, so the click is mapped through
-// the same cover transform into video pixel space before the 1×1 canvas
-// sample); Esc cancels. Resolves a '#rrggbb' hex, or null (declined/cancel).
-async function pickColourFromScreen() {
-  const md = navigator.mediaDevices
-  if (!md || !md.getDisplayMedia) return null
-  let stream
-  try { stream = await md.getDisplayMedia({ video: true, audio: false }) }
-  catch { return null }                          // the user declined the capture prompt
-  const video = document.createElement('video')
-  video.srcObject = stream
-  video.muted = true
-  video.playsInline = true
-  const overlay = document.createElement('div')
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:#000;display:flex;align-items:center;justify-content:center;cursor:crosshair;'
-  video.style.cssText = 'width:100vw;height:100vh;object-fit:cover;'
-  overlay.appendChild(video)
-  const hint = document.createElement('div')
-  hint.textContent = 'Click the pixel to take its colour · Esc to cancel'
-  hint.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:2147483648;background:rgba(0,0,0,.75);color:#fff;padding:8px 16px;border-radius:6px;pointer-events:none;font:14px system-ui,sans-serif;'
-  overlay.appendChild(hint)
-  document.body.appendChild(overlay)
-  let resultResolve = null
-  const result = new Promise(res => { resultResolve = res })
-  let done = false
-  const finish = (hex) => {
-    if (done) return
-    done = true
-    overlay.remove()
-    stream.getTracks().forEach(t => t.stop())
-    window.removeEventListener('keydown', onKey)
-    resultResolve(hex)
-  }
-  const onKey = (e) => { if (e.key === 'Escape') finish(null) }
-  const onClick = (e) => {
-    if (!video.videoWidth || !video.videoHeight) { finish(null); return }   // no frame yet
-    const rect = video.getBoundingClientRect()
-    const scale = Math.max(rect.width / video.videoWidth, rect.height / video.videoHeight)
-    const offX = (rect.width - video.videoWidth * scale) / 2
-    const offY = (rect.height - video.videoHeight * scale) / 2
-    const x = Math.floor((e.clientX - rect.left - offX) / scale)
-    const y = Math.floor((e.clientY - rect.top - offY) / scale)
-    if (x < 0 || y < 0 || x >= video.videoWidth || y >= video.videoHeight) { finish(null); return }
-    const c = document.createElement('canvas')
-    c.width = 1
-    c.height = 1
-    const ctx = c.getContext('2d')
-    ctx.drawImage(video, x, y, 1, 1, 0, 0, 1, 1)
-    const d = ctx.getImageData(0, 0, 1, 1).data
-    finish('#' + [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join(''))
-  }
-  window.addEventListener('keydown', onKey)
-  overlay.addEventListener('click', onClick)
-  try { await video.play() } catch { /* sampling works even if play() rejects */ }
-  return result
-}
+// B18 round 6, pt 4 — the round-4 SCREEN-PICK fallback for browsers without
+// the EyeDropper API (pickColourFromScreen, a getDisplayMedia full-screen
+// capture) was DELETED at the owner's request: "the eyedropper using the
+// share screen with the site is very concerning. is there no other way to do
+// this?" Where the browser lacks the EyeDropper API the button now opens the
+// NATIVE <input type="color"> picker (a hidden input, showPicker()) — no
+// screen capture, no permission prompt.
 
 // B18 round 3, pt 5 — does `pageId` have a NEIGHBOURING caption-only page
 // (the one right before or the one right after in page_number order)? The
@@ -1287,6 +1234,29 @@ export default function ComicEditor({
             const r0 = fig.getBoundingClientRect()
             return { pageId: id, merge: true, half: (e.clientY < r0.top + r0.height / 2) ? 'top' : 'bottom' }
           }
+          // B18 round 6, pt 3 — the pointer is over the page's caption BAR:
+          // the destination is that BAR's own slot (data-cap-slot), and the
+          // BAR's own top/bottom half — not the figure's — dictates the merge
+          // order (the same half mechanic the caption pages already use; the
+          // owner: "even if i hovered over the bottom half of the destination
+          // caption"). Read-only bars only (an ARMED bar is the page being
+          // edited — it keeps the round-4 figure-half rule), found by pointer
+          // geometry so a dragover dispatched on the figure (the headless
+          // harness) resolves the same bar a real cursor over it would.
+          let bar = null
+          const figBars = Array.from(fig.querySelectorAll('.cap-bar--bar'))
+          for (const b of figBars) {
+            const rb = b.getBoundingClientRect()
+            if (e.clientY >= rb.top && e.clientY <= rb.bottom) { bar = b; break }
+          }
+          if (bar) {
+            const rb = bar.getBoundingClientRect()
+            return {
+              pageId: id,
+              pos: bar.dataset.capSlot || 'top',
+              half: (e.clientY < rb.top + rb.height / 2) ? 'top' : 'bottom',
+            }
+          }
           const r = fig.getBoundingClientRect()
           return { pageId: id, pos: (e.clientY < r.top + r.height / 2) ? 'top' : 'bottom' }
         }
@@ -2001,7 +1971,12 @@ export default function ComicEditor({
       if (samePageBar && (src.slot || 'page') === target.pos) return   // onto its own half → no-op
       if (srcText !== '') {
         const dstText = String(dst[dstField] || '').trim()
-        const parts = target.pos === 'top' ? [srcText, dstText] : [dstText, srcText]
+        // B18 round 6, pt 3 — a bar destination carries its OWN half (where
+        // the pointer was inside the bar): the merge ORDER follows `half`;
+        // the destination slot stays `pos`. A plain figure-half drop has no
+        // `half` → the old rule (pos = the order).
+        const half = target.half || target.pos
+        const parts = half === 'top' ? [srcText, dstText] : [dstText, srcText]
         const merged = parts.filter(Boolean).join('\n')
         if (merged !== (dst[dstField] ?? null)) {
           flushCaptionTimer(dst.id)
@@ -2111,6 +2086,7 @@ export default function ComicEditor({
   // (absent fields keep their row values), so sending only theme_colour is
   // safe; null clears it.
   const themeTimer = useRef(null)                  // pending debounced theme PUT
+  const themeDropperRef = useRef(null)             // the hidden <input type="color"> (the no-EyeDropper fallback — round 6 pt 4)
   const setThemeColour = useCallback((value) => {
     if (selectedId === null) return
     setError(null)
@@ -2421,32 +2397,47 @@ export default function ComicEditor({
                   : `Optional — tints this comic's captions (default ${DEFAULT_CAPTION_BG})`}
                 onChange={e => setThemeColour(e.target.value)}
               />
-              {/* B18 round 2, substep 8 — one-click screen pick (the
-                  EyeDropper API, Chrome/Edge 105+). B18 round 3, pt 11 —
-                  the owner "don't see [it] anywhere": the button is ALWAYS
-                  rendered (never vanishing with no hint). B18 round 4,
-                  pt 5 — the owner: "the eyedropper tool is always greyed
-                  out and there's no way to activate it." It is now ALWAYS
-                  enabled: the native EyeDropper API where present, and a
-                  getDisplayMedia screen-pick fallback
-                  (pickColourFromScreen) where not. Cancelling the picker
-                  (a throw, or a null fallback) is swallowed. */}
+              {/* B18 round 2, substep 8 — one-click pick (the EyeDropper
+                  API, Chrome/Edge 105+). B18 round 3, pt 11 — the owner
+                  "don't see [it] anywhere": the button is ALWAYS rendered
+                  (never vanishing with no hint). B18 round 4, pt 5 — the
+                  owner: "the eyedropper tool is always greyed out and
+                  there's no way to activate it." It is ALWAYS enabled.
+                  B18 round 6, pt 4 — the owner: "the eyedropper using the
+                  share screen with the site is very concerning. is there no
+                  other way to do this?" — the round-4 getDisplayMedia
+                  screen-pick is GONE: where the browser lacks the EyeDropper
+                  API the button opens the NATIVE <input type="color">
+                  picker (the hidden input above, showPicker()) — no screen
+                  capture, no permission prompt. Cancelling either picker
+                  (a throw, or a dismissed dialog) is swallowed. */}
+              <input
+                ref={themeDropperRef}
+                type="color"
+                className="theme-dropper-input"
+                aria-hidden="true"
+                tabIndex={-1}
+                value={selectedComic.theme_colour || DEFAULT_CAPTION_BG}
+                onChange={e => { if (e.target.value) setThemeColour(e.target.value) }}
+              />
               <button
                 type="button"
                 className="theme-dropper"
                 title={'EyeDropper' in window
                   ? 'Pick a colour from anywhere on screen'
-                  : 'Pick a colour from anywhere on screen (screen-pick — this browser lacks the EyeDropper API)'}
-                onClick={async () => {
-                  try {
-                    if ('EyeDropper' in window) {
-                      const res = await new window.EyeDropper().open()
-                      setThemeColour(res.sRGBHex)
-                    } else {
-                      const hex = await pickColourFromScreen()
-                      if (hex) setThemeColour(hex)
-                    }
-                  } catch { /* the user cancelled the picker */ }
+                  : 'Open the colour picker (this browser lacks the EyeDropper API)'}
+                onClick={() => {
+                  if ('EyeDropper' in window) {
+                    new window.EyeDropper().open()
+                      .then(res => { if (res && res.sRGBHex) setThemeColour(res.sRGBHex) })
+                      .catch(() => {})             // the user cancelled the picker
+                    return
+                  }
+                  // No EyeDropper API — the native colour picker (the hidden
+                  // <input type="color">): no screen capture, no prompt.
+                  const el = themeDropperRef.current
+                  if (!el) return
+                  try { el.showPicker() } catch { el.click() }
                 }}
               >
                 Eyedropper
@@ -2923,6 +2914,11 @@ export default function ComicEditor({
                       // (draggable, click to arm, bin deletes that slot). The
                       // slot decides everything: the text field (slotOf()),
                       // the armed key, the drag payload, the bin's target.
+                      // B18 round 6, pt 3 — the bar carries its OWN slot: a drop ON
+                      // the bar targets that slot, ordered by the bar's own top/bottom
+                      // half (resolveCaptionTarget reads data-cap-slot — the comment
+                      // lives OUTSIDE the JSX tag; comments are illegal between
+                      // attributes, so this one sits with the round-4 note above).
                       const readBar = (slot, text) => (
                         <div
                           className={
@@ -2934,6 +2930,7 @@ export default function ComicEditor({
                           title={`Click to edit the ${slot} caption · drag it to a page half, onto a caption page (merge), or to a gap (it becomes a caption page)`}
                           draggable
                           data-caption-drag="bar"
+                          data-cap-slot={slot}
                           onDragStart={e => startCaptionDrag(e, 'bar', p, slot)}
                           onDragEnd={endCaptionDrag}
                           onClick={e => { e.stopPropagation(); setCaptionEditId(`${p.id}:${slot}`) }}
@@ -2948,7 +2945,7 @@ export default function ComicEditor({
                       )
 
                       const armedBar = (slot, text) => (
-                        <div className="cap-bar" style={capStyle}>
+                        <div className="cap-bar" data-cap-slot={slot} style={capStyle}>
                           <PageBin
                             title={`Delete the ${slot} caption on page ${p.page_number}`}
                             disabled={deleting}

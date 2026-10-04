@@ -206,8 +206,11 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    B18 round 3, pt 10 — `text-align` is INERT on the inline <span> the
    bar's text is (the "still not centred" complaint): make it a block, and
    pre-wrap so multi-line captions (merged text, Ctrl+Enter) keep their
-   line breaks. */
-.page-caption { display: block; margin: 0 0 8px; font-weight: 600; text-align: center; white-space: pre-wrap; }
+   line breaks.
+   B18 round 6, pt 2 — a very long single word must BREAK inside the
+   caption (overflow-wrap), so the preview figure (width: fit-content)
+   can never outgrow the scroller and shove the page to the left margin. */
+.page-caption { display: block; margin: 0 0 8px; font-weight: 600; text-align: center; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* Step 8 — the editable caption input now sits above the ACTIVE page's image
    in the PREVIEW (moved here from the left-pane rows; the Step-4 debounce /
@@ -218,8 +221,15 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    input show the same text; keep them visually identical).
    B18 round 3, pt 12 — the bar editor is now a <textarea> (multi-line:
    Enter commits, Ctrl/⌘+Enter = a line break): starts one line tall, grows
-   with the text, no resize handle. */
-.caption-input { margin: 0 0 8px; font-size: .95rem; line-height: 1.4; text-align: center; resize: none; min-height: 0; }
+   with the text, no resize handle.
+   B18 round 6, pt 1 — it AUTO-SIZES like the caption page's input
+   (field-sizing: content, the same trick as .caption-page-input below):
+   a multi-line caption opens at its full height instead of collapsing to
+   one line (the owner: "it's becoming a single line when clicked, making
+   editing it hard … it's also supposed to look like it would when done
+   while editing, just like we did with the caption pages"); pt 2 — long
+   words wrap (overflow-wrap). */
+.caption-input { margin: 0 0 8px; font-size: .95rem; line-height: 1.4; text-align: center; field-sizing: content; min-height: 34px; max-height: 288px; resize: none; overflow-y: auto; box-sizing: border-box; overflow-wrap: anywhere; }
 .caption-status { display: block; margin: 0 0 8px; font-size: .8rem; font-weight: 400; line-height: 1.3; }
 /* 2026-09-27 user tweak — the transient save cues ('Saving…' / 'Caption
    saved') now sit in the "Preview" heading row, next to the active-page
@@ -370,7 +380,7 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
   min-height: 48px; max-height: 288px;
   margin: 0;
   padding: 12px 14px; font-size: 1rem; line-height: 1.5;
-  text-align: center; resize: none; overflow-y: auto;
+  text-align: center; resize: none; overflow-y: auto; overflow-wrap: anywhere;
   overscroll-behavior: contain;
   box-sizing: border-box;
 }
@@ -383,7 +393,7 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 .cap-merge:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .cap-merge:disabled { opacity: .45; cursor: default; }
 /* A non-active caption page shows its text as a centred, wrapped figcaption. */
-.caption-page-caption { text-align: center; white-space: pre-wrap; }
+.caption-page-caption { text-align: center; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* A caption-only TILE (grid / fill zoom regimes): there is no <img>, so a
    centred placeholder over the tile's usual black background + label.
@@ -401,6 +411,7 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  overflow-wrap: anywhere;
   line-height: 1.4;
 }
 
@@ -415,6 +426,18 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
   border-radius: 6px;
   cursor: pointer;
   user-select: none;
+  /* B18 round 6, pt 2 — size containment: the bar's WIDTH must be the
+     figure's (i.e. the image's) width, not its text's max-content. Without
+     this, a single very long word sets the bar's (and thus the
+     fit-content figure's) width to the word's full length — the word never
+     wraps and a long-enough word shoves the page to the scroller's left
+     margin. `contain: inline-size` makes the bar's inline size computable
+     without its subtree, so the figure stays at the image's width and the
+     long word wraps inside the bar (via .page-caption/.caption-input
+     overflow-wrap: anywhere). Verified: the overhanging .page-bin is
+     unaffected (the bar was already position:relative = its containing
+     block). */
+  contain: inline-size;
 }
 .cap-bar--bar .page-caption { margin: 0; }
 .cap-bar .caption-input { display: block; width: 100%; margin: 0 0 4px; }
@@ -451,9 +474,24 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
   border: 1px solid var(--line); border-radius: 999px; cursor: pointer;
 }
 .theme-dropper:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
-/* B18 round 3, pt 11 — the button is now ALWAYS rendered; in a browser
-   without the EyeDropper API it is disabled (the JSX title explains why). */
+/* B18 round 3, pt 11 — the button is now ALWAYS rendered. B18 round 4,
+   pt 5 — it is ALWAYS enabled (the fallback below, not a dead button). */
 .theme-dropper:disabled { opacity: .45; cursor: default; }
+/* B18 round 6, pt 4 — the no-EyeDropper fallback: a NATIVE colour picker.
+   The owner: "the eyedropper using the share screen with the site is very
+   concerning. is there no other way to do this?" — so the round-4
+   getDisplayMedia screen-pick is GONE; where the browser lacks the
+   EyeDropper API the button opens THIS hidden <input type="color">
+   (showPicker()) instead of capturing the screen. Kept rendered (opacity 0,
+   not display:none) so showPicker() can open it; pointer-events off so it
+   never intercepts clicks. */
+.theme-dropper-input {
+  position: absolute;
+  width: 1px; height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  border: 0; padding: 0; margin: -1px;
+}
 .theme-clear {
   flex: 0 0 auto; padding: 3px 12px; font-size: 12px; font-weight: 600;
   background: transparent; color: var(--muted);
