@@ -477,20 +477,49 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 /* B18 round 3, pt 11 — the button is now ALWAYS rendered. B18 round 4,
    pt 5 — it is ALWAYS enabled (the fallback below, not a dead button). */
 .theme-dropper:disabled { opacity: .45; cursor: default; }
-/* B18 round 6, pt 4 — the no-EyeDropper fallback: a NATIVE colour picker.
-   The owner: "the eyedropper using the share screen with the site is very
-   concerning. is there no other way to do this?" — so the round-4
-   getDisplayMedia screen-pick is GONE; where the browser lacks the
-   EyeDropper API the button opens THIS hidden <input type="color">
-   (showPicker()) instead of capturing the screen. Kept rendered (opacity 0,
-   not display:none) so showPicker() can open it; pointer-events off so it
-   never intercepts clicks. */
+/* B18 round 6, pt 4 — the native colour picker, kept. Round 6 DELETED the
+   getDisplayMedia screen-pick ("the eyedropper using the share screen with
+   the site is very concerning"); round 6b moved the button's no-EyeDropper
+   fallback to the IN-PAGE eyedropper (the pick-mode styles below) and kept
+   THIS hidden <input type="color"> (showPicker()) for the small .theme-picker
+   swatch button — a manual colour. Kept rendered (opacity 0, not
+   display:none) so showPicker() can open it; pointer-events off so it never
+   intercepts clicks. */
 .theme-dropper-input {
   position: absolute;
   width: 1px; height: 1px;
   opacity: 0;
   pointer-events: none;
   border: 0; padding: 0; margin: -1px;
+}
+/* B18 round 6b — the in-page eyedropper (the owner: "everything seems
+   functional except the eyedropper … would it be easy if we did just
+   eyedropper from within the browser window?"). Where the browser lacks the
+   EyeDropper API the Eyedropper button enters pick mode: the scroller goes
+   crosshair (the whole thing — a click anywhere is a sample attempt) and a
+   sticky hint line rides the top. The sample itself is a 1×1 canvas read of
+   the SAME-ORIGIN comic image under the cursor (no permission, no prompt,
+   no capture). The .theme-picker swatch = the native picker, kept as the
+   small secondary control (a manual colour). */
+.theme-picker {
+  flex: 0 0 auto; width: 28px; height: 28px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: 1px solid var(--line); border-radius: 999px;
+  cursor: pointer;
+}
+.theme-picker:hover { border-color: var(--accent); background: var(--accent-soft); }
+.theme-picker-swatch {
+  width: 14px; height: 14px; border-radius: 50%; display: inline-block;
+  border: 1px solid rgba(0, 0, 0, .3);
+}
+.comic-preview--picking,
+.comic-preview--picking * { cursor: crosshair; }
+.pick-hint {
+  position: sticky; top: 0; z-index: 5;
+  width: fit-content; margin: 0 auto 8px; padding: 4px 12px;
+  font-size: 12px; font-weight: 600;
+  color: var(--ink); background: var(--accent-soft);
+  border: 1px solid var(--accent); border-radius: 999px;
 }
 .theme-clear {
   flex: 0 0 auto; padding: 3px 12px; font-size: 12px; font-weight: 600;

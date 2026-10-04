@@ -429,6 +429,11 @@ export default function ComicEditor({
   const [uploadMsg, setUploadMsg] = useState('')      // "Uploading i/N…"
   const [dragActive, setDragActive] = useState(false) // drag-over highlight
   const [notice, setNotice] = useState(null)          // green success line
+  // B18 round 6b — the in-page eyedropper (round 6 pt 4 rework): the pick
+  // mode the Eyedropper button enters where the browser lacks the EyeDropper
+  // API, plus the live hint line shown while picking.
+  const [picking, setPicking] = useState(false)       // in-page pick mode armed
+  const [pickHint, setPickHint] = useState(null)      // hint line text while picking
   const fileInputRef = useRef(null)                   // hidden <input type="file">
   const clickTimer = useRef(null)                     // single-vs-double-click disambiguation
   // The authoritative in-flight flag. `uploading` (state) lags one render; a
@@ -2110,6 +2115,109 @@ export default function ComicEditor({
     }, 400)
   }, [selectedId, csrfToken, setComics, setError, themeTimer])
 
+  // B18 round 6b — the in-page eyedropper (the owner: "everything seems
+  // functional except the eyedropper. It's pretty important so let's find a
+  // workaround. would it be easy if we did just eyedropper from within the
+  // browser window? … let's try one more time to get the eyedropper working
+  // before moving on").
+  //
+  // The owner's browser lacks the EyeDropper API, and round 6 DELETED the
+  // getDisplayMedia screen-share fallback ("very concerning") — and the
+  // "tiny screenshot of a few pixels" workaround can't exist: no browser can
+  // capture even a few pixels without the SAME full screen/window consent
+  // the owner rejected. But this app's own content needs none of that: the
+  // comic images are SAME-ORIGIN uploads, so the EXACT pixel under the cursor
+  // can be read with zero permissions — draw that 1×1 source rect of the
+  // <img> onto a 1×1 <canvas> and getImageData it. No prompt, no capture,
+  // every browser. (A cross-origin image would taint the canvas and throw;
+  // that's caught and reported as the "use the swatch picker" hint.)
+  //
+  // The flow: Eyedropper button (no EyeDropper API) → picking=true → the
+  // scroller goes crosshair + a hint line → a CAPTURE-phase click (fires
+  // before any child's onClick — caption arming, the PageBin page-delete,
+  // the fake "Disrupt the narrative" page — and the stopPropagation kills
+  // them: picking must never arm a caption or delete a page) resolves the
+  // click: an img.preview-thumb under the pointer → that pixel; else the
+  // element's computed background-color when it's a real (non-transparent)
+  // colour; else the hint line. A success runs the SAME debounced
+  // setThemeColour PUT, notes it, and exits the mode; Esc cancels.
+  const samplePixel = (imgEl, clientX, clientY) => {
+    const r = imgEl.getBoundingClientRect()
+    if (!r.width || !r.height || !imgEl.naturalWidth || !imgEl.naturalHeight) return null
+    // .preview-thumb is width/height:auto (no object-fit crop) — the rendered
+    // box maps 1:1 onto image content, so the scale is exact.
+    const x = Math.floor((clientX - r.left) * (imgEl.naturalWidth / r.width))
+    const y = Math.floor((clientY - r.top) * (imgEl.naturalHeight / r.height))
+    if (x < 0 || y < 0 || x >= imgEl.naturalWidth || y >= imgEl.naturalHeight) return null
+    try {
+      const c = document.createElement('canvas')
+      c.width = 1; c.height = 1
+      const ctx = c.getContext('2d', { willReadFrequently: true })
+      ctx.drawImage(imgEl, x, y, 1, 1, 0, 0, 1, 1)
+      const d = ctx.getImageData(0, 0, 1, 1).data
+      return '#' + [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join('')
+    } catch {
+      return null   // tainted canvas (cross-origin image) → the hint line
+    }
+  }
+
+  // "rgb(r, g, b)" / "rgba(r, g, b, a)" → "#rrggbb"; null when absent or
+  // transparent (alpha 0 is NO colour — don't sample it).
+  const rgbaToHex = (s) => {
+    const m = /^rgba?\(\s*(\d+),\s*(\d+),\s*(\d+)(?:,\s*([0-9.]+))?\s*\)$/.exec((s || '').trim())
+    if (!m) return null
+    if (m[4] !== undefined && parseFloat(m[4]) === 0) return null
+    return '#' + [m[1], m[2], m[3]].map(v => Number(v).toString(16).padStart(2, '0')).join('')
+  }
+
+  const handlePickClick = useCallback((e) => {
+    // CAPTURE phase: this fires before ANY child onClick (caption arming, the
+    // PageBin delete, the fake page) — and the stopPropagation below kills
+    // those, so a pick click can never arm a caption or delete a page.
+    e.stopPropagation()
+    const t = e.target
+    const img = t && t.closest ? t.closest('img.preview-thumb') : null
+    if (img) {
+      const hex = samplePixel(img, e.clientX, e.clientY)
+      if (hex) {
+        setThemeColour(hex)
+        setPickHint(null)
+        setPicking(false)
+        setNotice(`Theme colour set to ${hex} (sampled from the image).`)
+        return
+      }
+      setPickHint('That image can’t be sampled in this browser — use the small swatch button for a manual colour.')
+      return
+    }
+    const hex = t && t.nodeType === 1 ? rgbaToHex(getComputedStyle(t).backgroundColor) : null
+    if (hex) {
+      setThemeColour(hex)
+      setPickHint(null)
+      setPicking(false)
+      setNotice(`Theme colour set to ${hex} (sampled from the element).`)
+      return
+    }
+    setPickHint('Click on a comic image to sample its colour.')
+  }, [setThemeColour])
+
+  const startInPagePick = useCallback(() => {
+    setPickHint(null)
+    setPicking(true)
+  }, [])
+
+  // Esc cancels pick mode (the theme is untouched — no PUT has fired yet).
+  useEffect(() => {
+    if (!picking) return undefined
+    const onKey = (ev) => { if (ev.key === 'Escape') { setPicking(false); setPickHint(null) } }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [picking])
+
+  // A comic switch mid-pick must cancel the mode — setThemeColour targets the
+  // CURRENT selectedId at PUT time, and a sample taken for the old comic must
+  // never land on the new one.
+  useEffect(() => { setPicking(false); setPickHint(null) }, [selectedId])
+
   // --- Step 12.5b: MULTI-delete (the heading pill + the Delete key) ---------
   //
   // ONE confirm names the count + the page numbers, then a SEQUENTIAL loop of
@@ -2406,11 +2514,14 @@ export default function ComicEditor({
                   B18 round 6, pt 4 — the owner: "the eyedropper using the
                   share screen with the site is very concerning. is there no
                   other way to do this?" — the round-4 getDisplayMedia
-                  screen-pick is GONE: where the browser lacks the EyeDropper
-                  API the button opens the NATIVE <input type="color">
-                  picker (the hidden input above, showPicker()) — no screen
-                  capture, no permission prompt. Cancelling either picker
-                  (a throw, or a dismissed dialog) is swallowed. */}
+                  screen-pick is GONE (no screen capture, no permission
+                  prompt). B18 round 6b — where the browser lacks the
+                  EyeDropper API the button enters IN-PAGE pick mode (the
+                  exact pixel of the app's own same-origin comic images, via
+                  a 1×1 canvas — see handlePickClick); THIS hidden input is
+                  now opened only by the small .theme-picker swatch button
+                  (a manual colour). Cancelling any path (a throw, or a
+                  dismissed dialog) is swallowed. */}
               <input
                 ref={themeDropperRef}
                 type="color"
@@ -2425,22 +2536,45 @@ export default function ComicEditor({
                 className="theme-dropper"
                 title={'EyeDropper' in window
                   ? 'Pick a colour from anywhere on screen'
-                  : 'Open the colour picker (this browser lacks the EyeDropper API)'}
+                  : 'Pick a colour from the pages — click a comic image (in-page eyedropper); Esc cancels'}
                 onClick={() => {
-                  if ('EyeDropper' in window) {
+                  // B18 round 6b — window.__noEyeDropper (test seam) forces
+                  // the in-page path even where the API exists (the CDP
+                  // harness' Chrome has the EyeDropper API).
+                  if ('EyeDropper' in window && !window.__noEyeDropper) {
                     new window.EyeDropper().open()
                       .then(res => { if (res && res.sRGBHex) setThemeColour(res.sRGBHex) })
                       .catch(() => {})             // the user cancelled the picker
                     return
                   }
-                  // No EyeDropper API — the native colour picker (the hidden
-                  // <input type="color">): no screen capture, no prompt.
+                  // No EyeDropper API (the owner's browser) — the IN-PAGE
+                  // eyedropper (round 6b): the preview goes crosshair and a
+                  // click on a comic image samples its EXACT pixel (1×1
+                  // canvas over a same-origin upload — no screen capture, no
+                  // permission prompt at all). Esc cancels.
+                  startInPagePick()
+                }}
+              >
+                Eyedropper
+              </button>
+              {/* B18 round 6b — the native <input type="color"> picker, KEPT
+                  as a small secondary control (a manual colour) now that the
+                  Eyedropper button's no-API fallback is the in-page eyedropper. */}
+              <button
+                type="button"
+                className="theme-picker"
+                title="Open the colour picker (a manual colour)"
+                onClick={() => {
                   const el = themeDropperRef.current
                   if (!el) return
                   try { el.showPicker() } catch { el.click() }
                 }}
               >
-                Eyedropper
+                <span
+                  className="theme-picker-swatch"
+                  aria-hidden="true"
+                  style={{ background: selectedComic.theme_colour || DEFAULT_CAPTION_BG }}
+                />
               </button>
               <button
                 type="button"
@@ -2745,20 +2879,40 @@ export default function ComicEditor({
                white italic "Disrupt the narrative…", the '+' centred below.
                Click → a real caption page of the DEFAULT colour at slot 0.
                Vanishes the moment any page exists (this conditional). */
-            <div className="comic-preview comic-preview--empty">
+            <div
+              className={picking ? 'comic-preview comic-preview--empty comic-preview--picking' : 'comic-preview comic-preview--empty'}
+              onClickCapture={picking ? handlePickClick : undefined}
+            >
+              {picking && (
+                <div className="pick-hint" role="status">
+                  {pickHint || 'No pages yet — nothing to sample (click a comic image once one exists).'}
+                </div>
+              )}
               {/* B18 round 4, pt 7 — opening the "Disrupt the narrative" page
                   lands it IMMEDIATELY in the typable state: create it, then
-                  arm its 'page' editor (the armed textarea autofocuses). */}
+                  arm its 'page' editor (the armed textarea autofocuses).
+                  B18 round 6b — while picking, the capture-phase handler
+                  intercepts this click (a pick must never create a page). */}
               <FakeCaptionPage onAdd={async () => { const created = await insertCaptionPageAt(0); if (created) setCaptionEditId(`${created.id}:page`) }} />
             </div>
           ) : (
             <div
-              className="comic-preview"
+              className={picking ? 'comic-preview comic-preview--picking' : 'comic-preview'}
               ref={previewRef}
               onDragOver={onPreviewDragOver}
               onDragLeave={onPreviewDragLeave}
               onDrop={onPreviewDrop}
+              // B18 round 6b — in-page eyedropper: while picking, the
+              // capture-phase handler resolves every click in this scroller
+              // (and its stopPropagation blocks caption arming / page delete /
+              // any other child handler for that click).
+              onClickCapture={picking ? handlePickClick : undefined}
             >
+              {picking && (
+                <div className="pick-hint" role="status">
+                  {pickHint || 'Click a comic image to sample its colour — Esc cancels.'}
+                </div>
+              )}
               {visiblePages.map((p, i) => {
                 const isActive = activePageId === p.id
                 // Step 12.5b — multi-select outline on the selected (non-active)
