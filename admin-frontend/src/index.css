@@ -173,7 +173,43 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    internally (the page itself does not stretch). The Step-10 wheel-zoom
    listener is still bound to this element: a plain wheel now scrolls the
    window, Ctrl+wheel zooms the tiles. */
-.pages-section { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.pages-section { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+
+/* B18 round 5 — the Tiles ↔ Text mode bar + the text pane. The mode bar is a
+   slim flex row above the surface; the text pane flex-fills the remaining
+   section height (the section is now a flex column) so the textarea grows
+   with the window instead of a fixed 12 rows. */
+.mode-bar { display: flex; align-items: center; gap: 10px; margin: 2px 0 10px; }
+.mode-toggle { padding: 5px 14px; font-size: 13px; background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; font-weight: 600; }
+.mode-toggle:hover { border-color: var(--accent); }
+.mode-toggle--text { background: var(--accent); color: #fff; border-color: var(--accent); }
+/* The toggle is RED when the shared draft (unsaved text-mode edits) exists —
+   the cross-browser signal the spec asks for. */
+.mode-toggle--unsaved { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.mode-toggle--unsaved.mode-toggle--text { color: #fff; }
+.unsaved-badge { color: var(--accent); font-size: 12px; font-weight: 600; }
+.text-pane-toolbar { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; flex-wrap: wrap; }
+.text-btn { padding: 6px 14px; font-size: 13px; background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; font-weight: 600; }
+.text-btn:hover { border-color: var(--accent); }
+.text-btn--primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.text-btn--primary:hover { filter: brightness(1.1); }
+.auto-update { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; margin: 0; }
+.auto-update input { width: auto; margin: 0; }
+.text-dirty { color: var(--accent); font-size: 12px; font-weight: 600; }
+.text-pane { flex: 1 1 auto; min-height: 120px; width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: #141414; color: var(--ink); font: 14px/1.55 ui-monospace, "Cascadia Code", "Consolas", monospace; resize: vertical; white-space: pre; }
+.text-pane:focus { outline: none; border-color: var(--accent); }
+/* The comic list: a comic with unsaved text-mode edits is listed in RED (the
+   cross-browser signal). A leading marker survives OS-drawn dropdowns. */
+.comic-option--unsaved { color: var(--accent); font-weight: 700; }
+/* B18 round 5 — the Update/Discard + Review/Discard prompt overlays. */
+.modal-overlay { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, .62); padding: 16px; }
+.modal-card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px; max-width: 420px; width: 100%; box-shadow: 0 8px 30px rgba(0, 0, 0, .6); }
+.modal-card h3 { margin: 0 0 8px; font-size: 1.1rem; }
+.modal-text { margin: 0 0 16px; color: var(--muted); }
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+.modal-actions .btn--primary { background: var(--accent); color: #fff; border: 1px solid var(--accent); padding: 9px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+.modal-actions .btn--danger { background: #d64545; color: #fff; border: 1px solid #d64545; padding: 9px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+.modal-actions .btn--danger:hover { background: #b93a3a; }
 
 /* Left pane — the PAGES WINDOW (Step 9): a grid of fixed SQUARE (1:1) tiles,
    so many pages are visible at once (≥5/row at the editor's width) — no
@@ -588,6 +624,12 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 .preview-figure { cursor: pointer; }
 .preview-figure--active .preview-thumb { box-shadow: 0 0 0 2px var(--accent); }
 .preview-figure--selected .preview-thumb { box-shadow: 0 0 0 1px var(--accent); }
+/* B18 round 5 — the HOVER number: bottom-left of a preview page. Hidden until
+   the figure is hovered. The page number in general; the FROZEN media number
+   (accent red) while in text mode (".preview-hovernum--media"). */
+.preview-hovernum { position: absolute; left: 8px; bottom: 8px; z-index: 5; padding: 2px 8px; border-radius: 6px; background: rgba(0, 0, 0, .78); color: #fff; font-size: .75rem; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: .02em; pointer-events: none; opacity: 0; transition: opacity .12s ease; }
+.preview-figure:hover .preview-hovernum, .preview-figure:focus-visible .preview-hovernum { opacity: 1; }
+.preview-hovernum--media { background: var(--accent); color: #fff; }
 /* Step 9.5 (the bar) + 11.5c (the colour) — the preview's insertion-slot
    indicator: a solid bar on the edge of the figure the drop would land
    BEFORE (bar above it) / AFTER (bar below it). 11.5c recolors it to #fff

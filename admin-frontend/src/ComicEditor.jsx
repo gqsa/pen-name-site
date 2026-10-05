@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ResizableSection from './ResizableSection.jsx'
+// B18 round 5 — the text-pane engine (pure, no React): serialize the comic to
+// the markdown the owner edits, parse it back to blocks, and build the applyDoc
+// target (the reorder + caption + placeholder reconciliation). toPlainText is
+// the copy button's "plain text" (the punctuation markup stripped).
+import { comicToMarkdown, markdownToBlocks, buildTargetDoc, toPlainText } from './textMode.js'
 
 // B2.5 — the comic editor — shell + dropzone/upload + drag-reorder + caption auto-save.
 //
@@ -283,6 +288,59 @@ function storeSelectedComic(id) {
   try { window.localStorage.setItem(SELECTED_COMIC_STORAGE_KEY, String(id)) } catch { /* session-only */ }
 }
 
+// --- B18 round 5 — "was in text mode" REMEMBERED per comic (browser-specific).
+// The owner asked the editor to REMEMBER its state per comic and, on return,
+// auto-return to text mode. The remembered flag is browser-specific (this
+// browser's localStorage); the CROSS-browser signal is the server draft. So:
+// this browser auto-returns to text mode for a comic it last left in text mode,
+// and (separately) ANY browser sees the red "unsaved" indicators for a comic
+// with a server draft. The flag is set when entering text mode and cleared
+// when a clean regeneration/update leaves text mode.
+const TEXTMODE_REMEMBER_PREFIX = 'gqsa.comicTextMode.'
+function readRememberedTextMode(comicId) {
+  try {
+    return window.localStorage.getItem(TEXTMODE_REMEMBER_PREFIX + comicId) === '1'
+  } catch { return false }
+}
+function storeRememberedTextMode(comicId, on) {
+  try {
+    if (on) window.localStorage.setItem(TEXTMODE_REMEMBER_PREFIX + comicId, '1')
+    else window.localStorage.removeItem(TEXTMODE_REMEMBER_PREFIX + comicId)
+  } catch { /* session-only */ }
+}
+
+// --- B18 round 5 — the shared text-mode draft envelope ----------------------
+// The draft is the owner's un-updated text-mode edits. It is stored SERVER-side
+// (the text_drafts table) so it is shared across browsers (any browser that
+// opens this comic sees it). The FROZEN number→pageId map is part of what makes
+// the edits meaningful (a [media N] marker only resolves to a page with the
+// map), so it is persisted IN the draft too. The server stores a single TEXT
+// blob; we encode it as a small JSON envelope { v, text, map }. A draft that is
+// not a valid envelope (an older/plain-text draft) degrades to { text, map:∅ }.
+function draftEncode(text, map) {
+  return JSON.stringify({
+    v: 1,
+    text: String(text ?? ''),
+    map: Object.fromEntries(map ? map.entries() : []),
+  })
+}
+function draftDecode(raw) {
+  if (raw == null) return null
+  if (typeof raw !== 'string') return null
+  try {
+    const o = JSON.parse(raw)
+    if (o && typeof o.text === 'string') {
+      const m = new Map()
+      const src = o.map && typeof o.map === 'object' ? o.map : {}
+      for (const [k, v] of Object.entries(src)) m.set(Number(k), v)
+      return { text: o.text, map: m }
+    }
+    return null
+  } catch {
+    return { text: raw, map: new Map() }
+  }
+}
+
 // 2026-09-28 follow-up — WINDOW-scoped scroll helpers. The old centre effect
 // used `el.scrollIntoView()`, which scrolls EVERY scrollable ancestor up to
 // the viewport — including the DOCUMENT itself: with the active page on
@@ -548,6 +606,63 @@ export default function ComicEditor({
   // Step 12 — deleting the ACTIVE page (the server renumbers the rest to a
   // clean 1..N). `deleting` is the in-flight flag (busy look + re-entry guard).
   const [deleting, setDeleting] = useState(false)
+
+  // --- B18 round 5 — the text pane (markdown editing of the comic) ----------
+  // `textMode` = the pane is showing the TEXT view (markdown) instead of the
+  // page tiles. `textValue` = the textarea contents. `textDirty` = the text
+  // has un-updated changes (the red indicators + the draft row). `autoUpdate`
+  // = the OFF-by-default toggle: when ON, an edit re-applies the text live
+  // (debounced); when OFF, the Update button (or switching back to tiles)
+  // applies it. `textUpdating` = an apply is in flight (busy + re-entry guard).
+  // `showTextModal` = the Update/Discard prompt (a pending preview reorder that
+  // conflicts with un-updated text) — null when not shown.
+  const [textMode, setTextMode] = useState(false)
+  const [textValue, setTextValue] = useState('')
+  const [textDirty, setTextDirty] = useState(false)
+  const [autoUpdate, setAutoUpdate] = useState(false)
+  const [textUpdating, setTextUpdating] = useState(false)
+  const [showTextModal, setShowTextModal] = useState(false)
+  // B18 round 5 — the GUARD prompt: shown when the owner attempts a TILES-mode
+  // edit (upload / reorder / caption / delete) while unsaved text-mode edits
+  // exist (the shared draft). "Review" switches to text mode; "Discard" clears
+  // the draft + proceeds with the attempted edit. `guardActionRef` holds the
+  // deferred edit (a no-arg thunk) that "Discard" will run.
+  const [showGuard, setShowGuard] = useState(false)
+  const guardActionRef = useRef(null)
+  // Transient copy-button cue ("Copied.") that auto-hides after ~2 s.
+  const [copyCue, setCopyCue] = useState(null)
+  // The textarea contents mirrored to a ref (always current) so a debounced
+  // auto-apply reads the LATEST text, not the stale closure value.
+  const textValueRef = useRef('')
+  useEffect(() => { textValueRef.current = textValue }, [textValue])
+  // The FROZEN number→pageId map, captured when text mode was entered (the
+  // number of a marker always denotes the page that was that media when the
+  // mode was entered — even after a reorder). Refreshed only on regeneration
+  // events (entering text mode / a clean preview reorder / a Discard).
+  const mediaNumberRef = useRef(new Map())
+  // The pending preview reorder (the NEW page order as page objects) the
+  // owner is about to commit while un-updated text changes exist. Discarding
+  // the modal applies it + regenerates the markdown; Updating ignores it.
+  const pendingReorderRef = useRef(null)
+  // The debounced auto-update timer (autoUpdate ON).
+  const autoUpdateTimer = useRef(null)
+  // The textarea element (scroll-position preservation on regeneration).
+  const textPaneRef = useRef(null)
+  // The comic id we already auto-restored text mode for (prevents the restore
+  // effect from re-firing on every render once it has entered text mode).
+  const autoRestoredRef = useRef(null)
+  // `reorder` is declared LATER (after the caption/selection machinery), so the
+  // early helpers (e.g. the modal Discard) reach it through this ref — a TDZ
+  // guard. It is assigned right after `reorder` is defined.
+  const reorderRef = useRef(null)
+  // B18 round 5 — the FROZEN media number for a page (the reverse of
+  // mediaNumberRef's number→pageId map), for the preview hover label in text
+  // mode ("Media N"). null when the page has no frozen number (a caption page,
+  // or before text mode has been entered).
+  const mediaNumberFor = (pageId) => {
+    for (const [num, pid] of mediaNumberRef.current) if (pid === pageId) return num
+    return null
+  }
 
   // Clear the deferred single-click timer if the component unmounts early.
   useEffect(() => () => { if (clickTimer.current) clearTimeout(clickTimer.current) }, [])
@@ -951,6 +1066,241 @@ export default function ComicEditor({
       setComics(nextComics)
     }
   }, [csrfToken, docSnapshot])
+
+  // --- B18 round 5 — the text-pane engine wiring (apply / regenerate / draft) ---
+  // loadDraft — fetch the shared draft (the owner's un-updated text-mode edits
+  // + the frozen number map) for a comic. Returns { text, map } or null.
+  const loadDraft = useCallback(async (comicId) => {
+    try {
+      const res = await fetch(`/api/admin/comics/${comicId}/text-draft`, { headers: { Accept: 'application/json' } })
+      if (!res.ok) return null
+      const data = await res.json()
+      return draftDecode(data.draft)
+    } catch { return null }
+  }, [])
+
+  // saveDraft — persist the shared draft (text + frozen map) to the server so
+  // it is visible across browsers (the red indicators point at it).
+  const saveDraft = useCallback(async (text) => {
+    if (selectedId === null) return
+    try {
+      await fetch(`/api/admin/comics/${selectedId}/text-draft`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ draft: draftEncode(text, mediaNumberRef.current) }),
+      })
+    } catch { /* best-effort — the textarea already holds the text */ }
+  }, [selectedId, csrfToken])
+
+  // clearDraftFn — drop the shared draft (the comic is the source of truth
+  // again — after an update / a discard / a clean regeneration).
+  const clearDraftFn = useCallback(async () => {
+    if (selectedId === null) return
+    try {
+      await fetch(`/api/admin/comics/${selectedId}/text-draft`, {
+        method: 'DELETE',
+        headers: { 'X-CSRF-Token': csrfToken },
+      })
+    } catch { /* best-effort */ }
+  }, [selectedId, csrfToken])
+
+  // regenerateText — a REGENERATION EVENT (entering text mode / a clean preview
+  // reorder / a Discard): rebuild the markdown from the comic's CURRENT order,
+  // refresh the frozen number map + the textarea, and clear the dirty flag.
+  const regenerateText = useCallback(() => {
+    // Preserve the textarea's scroll + caret across the regeneration (spec: a
+    // clean preview reorder keeps the textarea's scroll position).
+    const pane = textPaneRef.current
+    const prevScrollTop = pane ? pane.scrollTop : 0
+    const prevSelStart = (pane && typeof pane.selectionStart === 'number') ? pane.selectionStart : null
+    const prevSelEnd = (pane && typeof pane.selectionEnd === 'number') ? pane.selectionEnd : null
+    const { markdown, numberToPageId } = comicToMarkdown(selectedPages)
+    mediaNumberRef.current = numberToPageId
+    setTextValue(markdown)
+    setTextDirty(false)
+    if (pane) {
+      requestAnimationFrame(() => {
+        if (pane.scrollTop !== prevScrollTop) pane.scrollTop = prevScrollTop
+        if (prevSelStart !== null && pane.setSelectionRange) {
+          try { pane.setSelectionRange(prevSelStart, prevSelEnd) } catch { /* noop */ }
+        }
+      })
+    }
+  }, [selectedPages])
+
+  // applyTextMode — the UPDATE EVENT: parse the text, build the target doc, and
+  // reconcile it onto the comic (reorder + captions + placeholders) via
+  // applyDoc. On success the comic matches the text; the numbers stay FROZEN
+  // (they only refresh on a regeneration event). Clears the dirty flag + the
+  // shared draft. `textOverride` lets the debounced auto-apply pass the latest
+  // text (the state closure may be a keystroke behind).
+  const applyTextMode = useCallback(async (textOverride) => {
+    if (selectedId === null || textUpdating) return
+    const text = textOverride ?? textValueRef.current
+    const sc = (comics || []).find(c => c.id === selectedId) || null
+    const blocks = markdownToBlocks(text)
+    const target = buildTargetDoc(blocks, mediaNumberRef.current, selectedPages, sc ? sc.theme_colour : null)
+    setTextUpdating(true)
+    setError(null)
+    try {
+      await applyDoc(selectedId, target)
+      // The comic now matches the text. Keep the owner's text + FROZEN numbers
+      // (do NOT re-serialize — that would refresh the numbers, which is a
+      // regeneration event, not an update). Clear the dirty flag + the draft.
+      setTextDirty(false)
+      await clearDraftFn()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setTextUpdating(false)
+    }
+  }, [selectedId, textUpdating, comics, selectedPages, applyDoc, clearDraftFn, setError])
+
+  // enterTextMode — toggle ON: restore the shared draft (if any — the owner's
+  // un-updated edits + frozen map) or regenerate from the comic's current order
+  // (entering text mode is a regeneration event when there is no draft).
+  const enterTextMode = useCallback(async () => {
+    if (selectedId === null) return
+    const draft = await loadDraft(selectedId)
+    if (draft && draft.text) {
+      setTextValue(draft.text)
+      setTextDirty(true)
+      if (draft.map && draft.map.size) mediaNumberRef.current = draft.map
+    } else {
+      regenerateText()
+    }
+    setTextMode(true)
+    storeRememberedTextMode(selectedId, true)
+  }, [selectedId, loadDraft, regenerateText])
+
+  // exitTextMode — toggle OFF: switching back to tiles APPLIES the text's state
+  // to the comic (an update event) when there are un-updated changes.
+  const exitTextMode = useCallback(async () => {
+    if (textDirty) await applyTextMode()
+    setTextMode(false)
+    // The text-mode work session is over (the comic is the source of truth
+    // again), so drop this browser's "remembered text mode" for the comic —
+    // the next visit returns to tiles unless the owner re-enters text mode.
+    if (selectedId !== null) storeRememberedTextMode(selectedId, false)
+  }, [textDirty, applyTextMode, selectedId])
+
+  // handleModeToggle — the Tiles ↔ Text toggle (the round-5 primary control).
+  const handleModeToggle = useCallback(async () => {
+    if (textMode) await exitTextMode()
+    else await enterTextMode()
+  }, [textMode, enterTextMode, exitTextMode])
+
+  // handleTextChange — the textarea onChange: update the text, mark it dirty,
+  // then (debounced) persist the shared draft and — when autoUpdate is ON —
+  // apply the text live (the "immediately move a media to its text position").
+  const handleTextChange = useCallback((value) => {
+    setTextValue(value)
+    setTextDirty(true)
+    if (autoUpdateTimer.current) clearTimeout(autoUpdateTimer.current)
+    autoUpdateTimer.current = setTimeout(() => {
+      saveDraft(value)
+      if (autoUpdate) applyTextMode(value)
+    }, 600)
+  }, [saveDraft, autoUpdate, applyTextMode])
+
+  // copyText — the copy button: the text WITHOUT the punctuation markup (the
+  // plain prose + captions, in order), to the clipboard.
+  const copyText = useCallback(async () => {
+    const plain = toPlainText(textValueRef.current)
+    try {
+      await navigator.clipboard.writeText(plain)
+      setCopyCue('Copied.')
+      setTimeout(() => setCopyCue(null), 2000)
+    } catch {
+      setError('Copy failed — the clipboard is blocked here.')
+    }
+  }, [setError])
+
+  // --- B18 round 5 — the GUARD (tiles edit while unsaved text edits exist) ---
+  // guardOrPerform — run a tiles-mode edit, but if there are unsaved text-mode
+  // edits (the shared draft) and we are NOT in text mode, prompt first:
+  //   "There are unsaved text mode changes. Review in text mode or discard
+  //    them?"  — Review → text mode; Discard → clear the draft + proceed.
+  const guardOrPerform = useCallback((action) => {
+    // The draft state is computed inline — the `hasDraftForSelected` const is
+    // declared LATER in the render, and referencing it here (or in the deps)
+    // would be a TDZ ReferenceError at mount (a black screen).
+    const c = (comics || []).find(x => x.id === selectedId)
+    if (c && c.unsavedTextMode && !textMode) {
+      guardActionRef.current = action
+      setShowGuard(true)
+      return
+    }
+    action()
+  }, [comics, selectedId, textMode])
+
+  // guardReview — switch to text mode (the owner reviews/edits the text); the
+  // attempted tiles edit is dropped.
+  const guardReview = useCallback(() => {
+    setShowGuard(false)
+    guardActionRef.current = null
+    enterTextMode()
+  }, [enterTextMode])
+
+  // guardDiscard — clear the shared draft (discard the unsaved text edits),
+  // reset the local text state, then run the deferred tiles edit.
+  const guardDiscard = useCallback(async () => {
+    const action = guardActionRef.current
+    guardActionRef.current = null
+    setShowGuard(false)
+    await clearDraftFn()
+    setTextDirty(false)
+    setTextValue('')
+    mediaNumberRef.current = new Map()
+    if (action) action()
+  }, [clearDraftFn])
+
+  // --- B18 round 5 — the UPDATE / DISCARD modal (a preview reorder that
+  // conflicts with un-updated text, while in text mode) ---------------------
+  // beginTextModal — the owner dragged a preview reorder while in text mode
+  // with un-updated text. Park the pending order; show the modal.
+  const beginTextModal = useCallback((pendingPages) => {
+    pendingReorderRef.current = pendingPages
+    setShowTextModal(true)
+  }, [])
+
+  // modalUpdate — UPDATE: apply the markdown (an update event); the pending
+  // drag is NOT applied (the markdown wins).
+  const modalUpdate = useCallback(async () => {
+    setShowTextModal(false)
+    pendingReorderRef.current = null
+    await applyTextMode()
+  }, [applyTextMode])
+
+  // modalDiscard — DISCARD: apply the pending drag (the comic reorders), then
+  // regenerate the markdown from the new order (a regeneration event — numbers
+  // refresh). The pending order is applied via the existing `reorder` path.
+  const modalDiscard = useCallback(async () => {
+    const pending = pendingReorderRef.current
+    pendingReorderRef.current = null
+    setShowTextModal(false)
+    if (pending && pending.length && reorderRef.current) {
+      // The "apply the drag" half of the Discard: the plain reorder (NOT the
+      // guarded wrapper, so it does not re-trigger this modal). reorderRef is
+      // assigned right after `reorder` is defined (TDZ guard).
+      await reorderRef.current(pending)
+    }
+    await regenerateText()
+  }, [regenerateText])
+
+  // B18 round 5 — RESTORE-ON-LOAD: if THIS browser remembers the comic was in
+  // text mode (the owner was working there), auto-return to text mode once the
+  // comic's data is loaded (restoring the shared draft if one exists). Fires
+  // once per comic selection (autoRestoredRef guards re-runs).
+  useEffect(() => {
+    if (selectedId === null) return
+    if (!comics || comics.length === 0) return
+    if (textMode) return
+    if (autoRestoredRef.current === selectedId) return
+    if (!readRememberedTextMode(selectedId)) return
+    autoRestoredRef.current = selectedId
+    enterTextMode()
+  }, [selectedId, comics, textMode, enterTextMode])
 
   const performUndo = useCallback(() => {
     const run = async () => {
@@ -1778,6 +2128,28 @@ export default function ComicEditor({
     }
   }, [selectedId, selectedPages, pages, csrfToken])
 
+  // B18 round 5 — expose `reorder` to the early modal helper (TDZ guard).
+  useEffect(() => { reorderRef.current = reorder }, [reorder])
+
+  // B18 round 5 — REORDER WITH the text-mode guard / modal. A preview reorder
+  // is a tiles action that conflicts with un-updated text, so:
+  //   text mode + dirty text  → the Update / Discard MODAL (the drag is parked)
+  //   text mode + clean text  → apply the drag + regenerate the markdown
+  //                             (a regeneration event — numbers refresh)
+  //   tiles + shared draft    → the GUARD prompt (Review → text mode;
+  //                             Discard → clear the draft + apply the drag)
+  //   otherwise               → the plain reorder
+  const reorderWithGuard = useCallback(async (next) => {
+    if (textMode) {
+      if (textDirty) { beginTextModal(next); return }
+      await reorder(next)
+      await regenerateText()
+      return
+    }
+    // tiles: guardOrPerform prompts when a shared draft exists, else performs.
+    guardOrPerform(() => reorder(next))
+  }, [textMode, textDirty, beginTextModal, guardOrPerform, reorder, regenerateText])
+
   // Step 13 — the SECTION is the file-drop catch-all: a file dropped anywhere
   // in it appends at the end (Step 14: at the resolved slot). Defined AFTER
   // reorder (it calls it) — a forward reference in the deps array would be a
@@ -1836,9 +2208,9 @@ export default function ComicEditor({
     const plan = planBlockDrop(draggedId, targetId)
     clearDrag()
     if (!plan) return                            // self / block member / already there
-    reorder(plan.next)
+    reorderWithGuard(plan.next)
     commitDragActive(draggedId)                  // the dragged page becomes active
-  }, [clearDrag, reorder, planBlockDrop, commitDragActive, gapFromEvent])
+  }, [clearDrag, reorderWithGuard, planBlockDrop, commitDragActive, gapFromEvent])
 
   // Step 11.5c — drop on the list body / a row / a row's half: the SAME
   // resolver (gapFromEvent) decides the gap (a row's top/bottom half, the
@@ -1865,9 +2237,9 @@ export default function ComicEditor({
     const plan = planBlockDrop(draggedId, targetId)
     clearDrag()
     if (!plan) return                            // the drop would be a no-op
-    reorder(plan.next)
+    reorderWithGuard(plan.next)
     commitDragActive(draggedId)
-  }, [clearDrag, reorder, planBlockDrop, commitDragActive, gapFromEvent, resolveCaptionTarget, endCaptionDrag])
+  }, [clearDrag, reorderWithGuard, planBlockDrop, commitDragActive, gapFromEvent, resolveCaptionTarget, endCaptionDrag])
 
   // --- Step 9.5: drag-reorder on the PREVIEW ----------------------------------
   //
@@ -1960,9 +2332,9 @@ export default function ComicEditor({
     const plan = planBlockDrop(draggedId, targetId)
     clearDrag()
     if (!plan) return
-    reorder(plan.next)
+    reorderWithGuard(plan.next)
     commitDragActive(draggedId)
-  }, [previewDropIdx, clearDrag, reorder, planBlockDrop, commitDragActive, resolveCaptionTarget, endCaptionDrag])
+  }, [previewDropIdx, clearDrag, reorderWithGuard, planBlockDrop, commitDragActive, resolveCaptionTarget, endCaptionDrag])
 
   // --- Step 4: caption auto-save ------------------------------------------------
   //
@@ -2300,6 +2672,12 @@ export default function ComicEditor({
       const srcKey = `${srcPageId}:${srcSlot || 'page'}`
       const ok = await saveCaption(newPage.id, 'page', srcText)
       if (ok) {
+        // saveCaption persists but never touches the local state — seed the
+        // NEW page's row so the preview shows the carried text (the same
+        // setPages the paste path does for its pasted text). Without it the
+        // new page renders empty even though the server has the text, and
+        // the next edit/merge overwrites it (reading the stale null).
+        setPages(prev => prev.map(x => (x.id === newPage.id ? { ...x, caption: srcText } : x)))
         const timers = captionTimers.current
         if (timers[srcKey]) { clearTimeout(timers[srcKey]); delete timers[srcKey] }
         setPages(prev => prev.map(x => (x.id === srcPageId ? { ...x, [srcField]: null } : x)))
@@ -3141,6 +3519,12 @@ export default function ComicEditor({
 
   const selectedComic = comics.find(c => c.id === selectedId) || null
 
+  // B18 round 5 — the shared-draft signal for the selected comic (the server
+  // says "unsaved text mode edits" exist). Drives the RED toggle, the "Unsaved
+  // text mode edits." badge, and the RED comic-list entry — in ANY browser
+  // (the draft is server-side, not this session's local textDirty).
+  const hasDraftForSelected = !!(selectedComic && selectedComic.unsavedTextMode)
+
   // Step 10 — derive the zoom regime + the grid tile size for THIS render:
   // low = a file-name list, mid = the grid (tile = `--tile` px), high = one
   // full-width tile. `tilePx` is linear across the grid regime (20..80 →
@@ -3206,7 +3590,17 @@ export default function ComicEditor({
           >
             {comics.length === 0 && <option value="">(no comics yet — create one below)</option>}
             {comics.map(c => (
-              <option key={c.id} value={c.id}>{c.title}</option>
+              // B18 round 5 — a comic with UNSAVED text-mode edits (the shared
+              // draft exists on the server) is listed in RED so the owner sees
+              // it in the comic list, in any browser. A leading marker makes the
+              // signal survive OS-drawn dropdowns that ignore option colour.
+              <option
+                key={c.id}
+                value={c.id}
+                className={c.unsavedTextMode ? 'comic-option comic-option--unsaved' : 'comic-option'}
+              >
+                {c.unsavedTextMode ? '● ' : ''}{c.title}
+              </option>
             ))}
           </select>
 
@@ -3370,6 +3764,78 @@ export default function ComicEditor({
               grid (tile size = `--tile`, set inline), fully in = one tile
               filling the section width. */}
           <div className="pages-section" ref={pagesSectionRef}>
+            {/* B18 round 5 — the Tiles ↔ Text mode toggle + the unsaved-text-mode
+                badge. The toggle is RED when the shared draft exists (unsaved
+                text-mode edits); its hover explains the Review/Discard choice.
+                In TEXT mode the pane below is the comic as editable markdown
+                (prose-first); in TILES mode it is the existing grid (below). */}
+            <div className="mode-bar">
+              <button
+                type="button"
+                className={
+                  'mode-toggle'
+                  + (textMode ? ' mode-toggle--text' : '')
+                  + (hasDraftForSelected ? ' mode-toggle--unsaved' : '')
+                }
+                title={hasDraftForSelected && !textMode
+                  ? 'There are unsaved text mode changes. Return to text mode to review them, or keep editing in tiles (your next tile change will ask you to review or discard them).'
+                  : (textMode ? 'Switch back to the tile view (applies your text first).' : 'Edit this comic as text.')}
+                onClick={handleModeToggle}
+              >
+                {textMode ? 'Text' : 'Tiles'}
+              </button>
+              {hasDraftForSelected && !textMode ? (
+                <span className="unsaved-badge" title="This comic has unsaved text-mode edits (shared across browsers).">Unsaved text mode edits.</span>
+              ) : null}
+            </div>
+
+            {textMode ? (
+              /* B18 round 5 — the TEXT PANE: the comic as editable markdown.
+                 Toolbar: Update (apply the text to the comic), the auto-update
+                 toggle (OFF by default), and Copy (plain text, no markup).
+                 The textarea holds the text; markers [media N] are the
+                 numbered media, ">" lines are captions, "---" fences are
+                 caption pages, and everything else is prose. */
+              <>
+                <div className="text-pane-toolbar">
+                  <button
+                    type="button"
+                    className="text-btn text-btn--primary"
+                    disabled={textUpdating || !textDirty}
+                    title="Apply the text to the comic (reorder the media, set the captions, create/delete caption pages)."
+                    onClick={() => applyTextMode()}
+                  >
+                    {textUpdating ? 'Updating…' : 'Update'}
+                  </button>
+                  <label className="auto-update" title="When ON, moving a marker in the text immediately reorders the preview (live).">
+                    <input
+                      type="checkbox"
+                      checked={autoUpdate}
+                      onChange={e => setAutoUpdate(e.target.checked)}
+                    />
+                    Auto
+                  </label>
+                  <button
+                    type="button"
+                    className="text-btn"
+                    title="Copy the text WITHOUT the punctuation markup (the plain prose + captions, in order)."
+                    onClick={copyText}
+                  >
+                    {copyCue || 'Copy'}
+                  </button>
+                  {textDirty ? <span className="text-dirty">Unsaved text mode edits.</span> : null}
+                </div>
+                <textarea
+                  ref={textPaneRef}
+                  className="text-pane"
+                  value={textValue}
+                  onChange={e => handleTextChange(e.target.value)}
+                  spellCheck={false}
+                  placeholder={'Describe the comic…\n\n[media 1]\n> A caption above or below the image.\n\n---\nA caption-only page.\n---'}
+                />
+              </>
+            ) : (
+              <>
             {/* Step 12.5a — the heading row is flex; the always-visible
                 "Delete" pill sits right-aligned (the h3 spans the section
                 width, so its right edge IS the tiles' right margin) and
@@ -3556,6 +4022,8 @@ export default function ComicEditor({
                 })}
               </ul>
             )}
+              </>
+            )}
           </div>
         </div>
 
@@ -3661,6 +4129,10 @@ export default function ComicEditor({
                 }
                 const showBefore = previewDropIdx === i && !!planAt(i)
                 const showAfter = previewDropIdx === i + 1 && !!planAt(i + 1)
+                // B18 round 5 — the hover label's number: the FROZEN media
+                // number in text mode (so the owner sees which [media x] a page
+                // is), else the plain page number (the general hover label).
+                const mediaNum = textMode ? mediaNumberFor(p.id) : null
                 // B18 round 4, pt 1 — while THIS page's caption editor is
                 // armed (captionEditId = `${p.id}:top|bottom|page`), the
                 // figure must NOT be a native drag source: the browser would
@@ -3697,6 +4169,16 @@ export default function ComicEditor({
                     onDragStart={e => onRowDragStart(e, p)}
                     onDragEnd={clearDrag}
                   >
+                    {/* B18 round 5 — the HOVER number (bottom-left of the
+                        page): the page number in general; the FROZEN media
+                        number instead while in text mode (owner: "this will
+                        help during editing"). */}
+                    <span className={
+                      'preview-hovernum'
+                      + (mediaNum !== null ? ' preview-hovernum--media' : '')
+                    }>
+                      {mediaNum !== null ? `Media ${mediaNum}` : `Page ${p.page_number}`}
+                    </span>
                     {/* B18 — the caption POSITION model: 'top' (default) |
                         'bottom' | 'page' (a caption-only page, no image).
                         B18 round 2 — the interaction model (spec:
@@ -3999,6 +4481,46 @@ export default function ComicEditor({
           )}
         </div>
       </div>
+
+      {/* B18 round 5 — the UPDATE / DISCARD modal: a preview reorder that
+          conflicts with un-updated text (while in text mode). Update = the
+          markdown wins (the drag is dropped); Discard = the drag applies + the
+          markdown regenerates (numbers refresh). */}
+      {showTextModal && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Unsaved text mode edits">
+          <div className="modal-card">
+            <h3>Unsaved text mode edits</h3>
+            <p className="modal-text">
+              You moved a page, but the text still has unsaved edits.
+              Update from the text (the move is dropped), or Discard the text
+              edits and keep the move?
+            </p>
+            <div className="modal-actions">
+              <button className="btn--primary" onClick={modalUpdate}>Update</button>
+              <button className="btn--danger" onClick={modalDiscard}>Discard</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* B18 round 5 — the GUARD prompt: a tiles-mode edit attempted while
+          unsaved text-mode edits (the shared draft) exist. Review → text mode;
+          Discard → clear the draft + proceed with the edit. */}
+      {showGuard && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Unsaved text mode changes">
+          <div className="modal-card">
+            <h3>Unsaved text mode changes</h3>
+            <p className="modal-text">
+              There are unsaved text mode changes. Review in text mode or
+              discard them?
+            </p>
+            <div className="modal-actions">
+              <button className="btn--primary" onClick={guardReview}>Review in text mode</button>
+              <button className="btn--danger" onClick={guardDiscard}>Discard</button>
+            </div>
+          </div>
+        </div>
+      )}
     </ResizableSection>
   )
 }

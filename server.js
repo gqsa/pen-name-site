@@ -531,6 +531,22 @@ for (const [table, col, type] of [
   }
 }
 
+// B18 round 5 — text-mode drafts (server-side, shared across browsers). The
+// owner's re-scope: a draft must survive a reload AND be visible from another
+// browser, so it lives in the DB (not localStorage). One row per comic that
+// holds UN-APPLIED text-mode changes; the row's mere PRESENCE is the "unsaved
+// text mode" flag the comic list + toggle read. Cleared on update / discard;
+// ON DELETE CASCADE drops it with the comic. CREATE TABLE IF NOT EXISTS is the
+// idempotent guard (a restart never errors on the existing table).
+{
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS text_drafts (
+      comic_id INTEGER PRIMARY KEY REFERENCES comics(id) ON DELETE CASCADE,
+      draft TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`);
+}
+
 // B1 seed: one tier + a little sample content, ONLY while a table is empty
 // (so a restart never duplicates it). Real content arrives via the admin
 // upload routes (B2.4); these rows give the schema something real to hold
@@ -1330,6 +1346,14 @@ app.get('/api/admin/content', (req, res) => {
   const pages = db.prepare('SELECT * FROM comic_pages ORDER BY comic_id, page_number').all();
   const images = db.prepare('SELECT * FROM images ORDER BY id').all();
   const videos = db.prepare('SELECT * FROM videos ORDER BY id').all();
+  // B18 round 5 — flag the comics that hold a server-side text-mode draft (the
+  // "unsaved text mode changes" the comic list + toggle render in red). The
+  // draft row's PRESENCE is the flag (no separate column); a Set keeps the
+  // lookup O(1) per comic.
+  const draftComics = new Set(
+    db.prepare('SELECT comic_id FROM text_drafts').all().map(r => r.comic_id)
+  );
+  comics.forEach(c => { c.unsavedTextMode = draftComics.has(c.id); });
   res.json({
     stories, comics, pages, images, videos,
     counts: { stories: stories.length, comics: comics.length,
@@ -1420,6 +1444,44 @@ app.delete('/api/admin/comics/:id', (req, res) => {
   res.json({ success: true }); // its pages are gone with it (ON DELETE CASCADE)
 });
 
+// B18 round 5 — the text-mode DRAFT (server-side, shared across browsers). It
+// is the text pane's markdown while that holds UN-APPLIED changes; its
+// presence is the "unsaved text mode" flag (the GET /api/admin/content
+// `unsavedTextMode`). Saved when the text diverges from the comic; cleared on
+// update / discard (the comic is the source of truth again) and on comic
+// delete (CASCADE). Admin-gated + readJsonBody, like the sibling routes.
+app.get('/api/admin/comics/:id/text-draft', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  const row = db.prepare('SELECT draft, updated_at FROM text_drafts WHERE comic_id = ?')
+    .get(Number(req.params.id));
+  if (!row) return res.json({ draft: null });
+  res.json({ draft: row.draft, updated_at: row.updated_at });
+});
+
+app.put('/api/admin/comics/:id/text-draft', async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  const id = Number(req.params.id);
+  try {
+    if (!db.prepare('SELECT id FROM comics WHERE id = ?').get(id))
+      return res.status(404).json({ error: 'Comic not found' });
+    const { draft } = await readJsonBody(req);
+    if (typeof draft !== 'string')
+      return res.status(400).json({ error: 'draft (string) required' });
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO text_drafts (comic_id, draft, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(comic_id) DO UPDATE SET draft = excluded.draft, updated_at = excluded.updated_at
+    `).run(id, draft, now);
+    res.json({ success: true });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.delete('/api/admin/comics/:id/text-draft', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
+  db.prepare('DELETE FROM text_drafts WHERE comic_id = ?').run(Number(req.params.id));
+  res.json({ success: true }); // idempotent — clearing a missing draft is a no-op
+});
+
 app.post('/api/admin/comic-pages', async (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Not admin' });
   try {
@@ -1427,7 +1489,7 @@ app.post('/api/admin/comic-pages', async (req, res) => {
     // B18 — caption_position: 'top' (default, round-1 layout) | 'bottom' |
     // 'page' (a caption-only page — no image). Unknown values fall back to the
     // default instead of 400ing (a lenient reader, like the existing routes).
-    const pos = ['top', 'bottom', 'page'].includes(caption_position) ? caption_position : 'top';
+    const pos = ['top', 'bottom', 'page', 'media'].includes(caption_position) ? caption_position : 'top';
     if (!comic_id || !Number.isInteger(page_number) || page_number < 1)
       return res.status(400).json({ error: 'comic_id + integer page_number (>= 1) required' });
     if (!db.prepare('SELECT id FROM comics WHERE id = ?').get(Number(comic_id)))
@@ -1436,14 +1498,17 @@ app.post('/api/admin/comic-pages', async (req, res) => {
     // (caption-only) stores no file. A caption may start blank on a 'page' row
     // (the editor's "insert caption page, then type" flow) — the content field
     // is the caption, not a hard NOT NULL.
-    if (pos === 'page') {
+    // B18 round 5 — 'media' is an EMPTY media slot (no file yet): a file-less
+    // page the text pane creates for a typed [media N] the owner hasn't filled
+    // with an upload/drag yet. Like 'page' it stores no file_path.
+    if (pos === 'page' || pos === 'media') {
       if (file_path)
-        return res.status(400).json({ error: 'A caption-only page (position "page") takes no file_path' });
+        return res.status(400).json({ error: `A position "${pos}" page takes no file_path` });
     } else if (!file_path) {
-      return res.status(400).json({ error: 'comic_id + integer page_number (>= 1) + file_path required (or position "page" for a caption-only page)' });
+      return res.status(400).json({ error: 'comic_id + integer page_number (>= 1) + file_path required (or position "page" for a caption-only page, "media" for an empty media slot)' });
     }
     const r = db.prepare('INSERT INTO comic_pages (comic_id, page_number, file_path, caption, caption_position) VALUES (?,?,?,?,?)')
-      .run(Number(comic_id), page_number, pos === 'page' ? null : String(file_path), caption ?? null, pos);
+      .run(Number(comic_id), page_number, (pos === 'page' || pos === 'media') ? null : String(file_path), caption ?? null, pos);
     res.status(201).json({ success: true, id: Number(r.lastInsertRowid) });
   } catch (e) {
     if (/UNIQUE constraint failed/.test(e.message))
@@ -1478,7 +1543,7 @@ app.patch('/api/admin/comic-pages/:id', async (req, res) => {
     // other fields, rather than 400ing the way the editor never would).
     const pos = (b.caption_position === undefined || b.caption_position === null)
       ? (row.caption_position ?? 'top')
-      : (['top', 'bottom', 'page'].includes(b.caption_position) ? b.caption_position : (row.caption_position ?? 'top'));
+      : (['top', 'bottom', 'page', 'media'].includes(b.caption_position) ? b.caption_position : (row.caption_position ?? 'top'));
     db.prepare('UPDATE comic_pages SET page_number=?, caption=?, file_path=?, caption_position=? WHERE id=?')
       .run(b.page_number ?? row.page_number,
            b.caption === undefined ? row.caption : b.caption, // explicit null CLEARS the caption
