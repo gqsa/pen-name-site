@@ -654,6 +654,388 @@ export default function ComicEditor({
     }
   }, [selectedPages, selectedIds, activePageId])
 
+  // --- B18 round 7b — editor undo/redo (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z) ----
+  //
+  // Contract (editor-overhaul §12; owner cross-comic decision, 2026-10-05):
+  //   1. Ctrl+Z undoes; Ctrl+Y / Ctrl+Shift+Z redo. While focus is in a text
+  //      field BOTH are ignored — the native text undo/redo stays intact.
+  //   2. ONE entry per logical action: a debounced PUT burst is a single
+  //      entry, and a FAILED PUT never leaves a phantom (nothing was
+  //      committed, so there is nothing to undo).
+  //   3. A new action (any comic) clears the redo stack; empty stacks are
+  //      no-ops.
+  //   4. CROSS-COMIC: the stack is shared and every entry is tagged with
+  //      its comicId. Undo/redo switches the editor to the entry's comic
+  //      FIRST, then applies. An entry whose comic was deleted in the
+  //      meantime is discarded and the next live entry is used (the owner's
+  //      call — the stack stays usable, not "punishing").
+  //
+  // Mechanism — pending / confirm / drain (why not just snapshot on commit?):
+  //   • beginAction / beginComposite register a PENDING entry: the comic +
+  //     a `before` snapshot taken AT THE ACTION'S START (before any local
+  //     state moves — that is why caption typing registers in
+  //     onCaptionChange, not in saveCaption, where the text is already in
+  //     state and the snapshot would be the AFTER, not the before).
+  //   • the commit path calls settleEntry(entry, success) when its request
+  //     settles (saveCaption / reorder / deletePage / theme debounce / the
+  //     composite's end).
+  //   • a post-render effect (the DRAIN) finalizes settled entries reading
+  //     the SETTLED local state (refs — never a stale closure): no state
+  //     movement → discard (a no-op, or the phantom rule); a single-commit
+  //     flow that settled failed → discard (contract 2); otherwise push
+  //     { comicId, before, after }. `after` is chain-correct: the NEXT
+  //     queued entry's `before` (it started from this action's result),
+  //     else the current state — so undo A, undo B, redo A, redo B each
+  //     land exactly where the actions left the comic.
+  //
+  // applyDoc (the undo/redo body) reconciles a snapshot onto its comic
+  // using ONLY the editor's existing endpoints — no new server surface:
+  //   1. DELETE pages the target dropped (the server renumbers the rest;
+  //      the upload FILE stays on disk — a redo re-POSTs the same
+  //      file_path, so undo/redo of a delete can never lose the image),
+  //   2. POST the pages the target has that are missing, at FRESH numbers
+  //      (a deleted row's number may be free AND another row's — never
+  //      collide),
+  //   3. PATCH the caption fields (slots cannot be set at creation, so
+  //      every target page is diffed against its current values),
+  //   4. ONE PATCH /reorder with the COMPLETE target set (the server
+  //      requires the exact current full set and 400s a partial list),
+  //   5. PUT the theme_colour when it differs (an explicit null clears).
+  // Then the local mirror (setPages / setComics, other comics untouched) —
+  // the validity effect above reconciles selection + active page after a
+  // comic switch (auto-heal).
+  //
+  // Cap: the newest HISTORY_CAP entries are kept (light JSON snapshots —
+  // no server traffic until an undo actually applies).
+
+  const HISTORY_CAP = 100
+
+  // Live mirrors (the sync effects below run before the drain's, so the
+  // drain always reads the committed state).
+  const pagesRef = useRef(pages)
+  const comicsRef = useRef(comics)
+  const selectedIdRef = useRef(selectedId)
+  useEffect(() => { pagesRef.current = pages }, [pages])
+  useEffect(() => { comicsRef.current = comics }, [comics])
+  useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
+
+  const historyRef = useRef([])      // undo stack: [{ comicId, before, after }]
+  const redoRef = useRef([])         // redo stack (same shape)
+  const pendingRef = useRef([])      // in-flight: [{ comicId, before, committedOnly, settled? }]
+  const compositeRef = useRef(0)     // nested composite depth (upload / paste / drop batches)
+  const captionBurstRef = useRef({})// `${pageId}:${slot}` → the typing burst's entry
+  const themeBurstRef = useRef(undefined)  // the theme drag burst's entry
+  const [historyVersion, setHistoryVersion] = useState(0)  // bumped on every settle → drains
+  // Re-entrancy: undo/redo are async (they apply a document over the network).
+  // Two rapid Ctrl+Z dispatches would otherwise interleave — the second one
+  // reads the SAME top entry while the first is still in flight, and both
+  // mutate the stacks (double-consume + corrupt bookkeeping). Every history
+  // action therefore runs through ONE promise chain: a second keystroke
+  // waits its turn, then reads the stack fresh and pops the NEXT entry —
+  // exactly the ordered LIFO sequence the user pressed.
+  const historyChainRef = useRef(Promise.resolve())
+  const enqueueHistory = (run) => {
+    historyChainRef.current = historyChainRef.current.then(run).catch(() => {})
+    return historyChainRef.current
+  }
+
+  // A comic's document state — exactly the fields the editor's endpoints
+  // write (its ordered pages + the theme colour).
+  const docSnapshot = useCallback((comicId) => {
+    const cid = Number(comicId)
+    const pagesSnap = (pagesRef.current || [])
+      .filter(p => p.comic_id === cid)
+      .sort((a, b) => (Number(a.page_number) || 0) - (Number(b.page_number) || 0))
+      .map(p => ({
+        id: p.id,
+        page_number: p.page_number,
+        file_path: p.file_path ?? null,
+        caption: p.caption ?? null,
+        caption_top: p.caption_top ?? null,
+        caption_bottom: p.caption_bottom ?? null,
+        caption_position: p.caption_position || 'top',
+      }))
+    const comic = (comicsRef.current || []).find(c => c.id === cid)
+    return { theme: comic ? (comic.theme_colour ?? null) : null, pages: pagesSnap }
+  }, [])
+  const docsEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+  const comicExists = (comicId) => (comicsRef.current || []).some(c => c.id === Number(comicId))
+
+  // --- pending / confirm / drain ---------------------------------------------
+  // Register a pending entry for a SINGLE-COMMIT action. Inside a composite
+  // it registers NOTHING (the composite owns the entry).
+  const beginAction = () => {
+    if (compositeRef.current > 0) return null
+    const comicId = selectedIdRef.current
+    if (comicId == null) return null
+    const entry = { comicId, before: docSnapshot(comicId), committedOnly: true }
+    pendingRef.current.push(entry)
+    return entry
+  }
+  // A batch of commits (upload, paste split, drop, merge, multi-delete): its
+  // entry survives PARTIAL success (a real action happened — the partial
+  // state is undoable), so `committedOnly` is off and "the state moved" is
+  // the only rule.
+  const beginComposite = () => {
+    compositeRef.current += 1
+    if (compositeRef.current !== 1) return
+    const comicId = selectedIdRef.current
+    if (comicId == null) return
+    pendingRef.current.push({ comicId, before: docSnapshot(comicId), committedOnly: false })
+  }
+  const endComposite = () => {
+    compositeRef.current = Math.max(0, compositeRef.current - 1)
+    if (compositeRef.current === 0) {
+      // The composite is finished: settle its entry (the ONLY in-flight
+      // non-committedOnly one — at most one is ever pushed, on the depth
+      // 0→1 transition) so the drain can finalize it. A fully-failed batch
+      // rolled back → zero diff → discarded; a partial batch → a real entry.
+      // (Without this the entry would stay unsettled forever and the
+      // in-flight guard would block every undo.)
+      for (let i = pendingRef.current.length - 1; i >= 0; i -= 1) {
+        const e = pendingRef.current[i]
+        if (e.settled === undefined && e.committedOnly === false) { e.settled = true; break }
+      }
+      setHistoryVersion(v => v + 1)
+    }
+  }
+  // The action's commit settled: mark it and let the post-render drain
+  // finalize (it reads the settled state — refs, not closures).
+  const settleEntry = (entry, success) => {
+    if (entry == null) return   // suppressed inside a composite — the composite settles
+    entry.settled = success
+    setHistoryVersion(v => v + 1)
+  }
+
+  // The drain: after every render in which at least one entry settled.
+  // Unsettled entries (their commit still in flight) stay queued.
+  useEffect(() => {
+    const queue = pendingRef.current
+    if (queue.length === 0) return
+    const drained = []
+    const kept = []
+    for (const entry of queue) {
+      if (entry.settled === undefined) kept.push(entry)
+      else drained.push(entry)
+    }
+    if (drained.length === 0) return
+    for (let i = 0; i < drained.length; i += 1) {
+      const entry = drained[i]
+      const now = docSnapshot(entry.comicId)
+      if (docsEqual(entry.before, now)) continue   // nothing moved → nothing to undo (no-op / rolled back)
+      if (entry.committedOnly && entry.settled !== true) continue   // failed PUT → no phantom entry
+      const next = drained[i + 1]
+      const after = (next && next.comicId === entry.comicId) ? next.before : now
+      const stack = historyRef.current
+      stack.push({ comicId: entry.comicId, before: entry.before, after })
+      if (stack.length > HISTORY_CAP) stack.shift()
+      redoRef.current = []                        // a new action clears redo (any comic)
+    }
+    pendingRef.current = kept
+  }, [historyVersion, docSnapshot])
+
+  // --- applyDoc: reconcile a snapshot onto its comic (the undo/redo body) ---
+  const applyDoc = useCallback(async (comicId, target) => {
+    const cid = Number(comicId)
+    const cur = docSnapshot(cid)
+    const curById = new Map(cur.pages.map(p => [p.id, p]))
+    const survivorIds = new Set(target.pages.map(p => p.id))
+    const headers = { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken }
+    // 1) Delete what the target dropped (the server renumbers the rest; the
+    //    upload files stay on disk — a redo re-POSTs the same file_path).
+    for (const p of cur.pages) {
+      if (survivorIds.has(p.id)) continue
+      const res = await fetch(`/api/admin/comic-pages/${p.id}`, { method: 'DELETE', headers })
+      if (!res.ok) throw new Error(`undo delete answered ${res.status}`)
+    }
+    // 2) Add what the target has that is missing, at FRESH numbers (after
+    //    the deletes the server numbers the survivors 1..n — n+1, n+2, …).
+    const survivors = cur.pages.filter(p => survivorIds.has(p.id))
+    const additions = target.pages.filter(p => !curById.has(p.id))
+    const createdMap = new Map()      // target page id → fresh server id
+    let freshNumber = survivors.length
+    for (const p of additions) {
+      freshNumber += 1
+      const res = await fetch('/api/admin/comic-pages', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          comic_id: cid,
+          page_number: freshNumber,
+          file_path: p.file_path,
+          caption: p.caption,
+          caption_position: p.caption_position || 'page',
+        }),
+      })
+      if (!res.ok) throw new Error(`undo add answered ${res.status}`)
+      const created = await res.json().catch(() => ({}))
+      createdMap.set(p.id, created.id)
+    }
+    // 3) Caption fields (slots cannot be set at creation) — diff every
+    //    target page against its CURRENT server-side value. A page this call
+    //    just CREATED has no server-side value yet (base = the target's own),
+    //    so it PATCHes nothing — and any PATCH must use the FRESH server id
+    //    (createdMap), not the snapshot's original id.
+    for (const p of target.pages) {
+      const pid = createdMap.get(p.id) || p.id
+      const curP = curById.get(p.id)
+      const base = curP || { caption: p.caption ?? null, caption_top: null, caption_bottom: null }
+      if ((base.caption ?? null) !== (p.caption ?? null)) {
+        const res = await fetch(`/api/admin/comic-pages/${pid}`, {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify({ caption: p.caption ?? null }),
+        })
+        if (!res.ok) throw new Error(`undo caption answered ${res.status}`)
+      }
+      if ((base.caption_top ?? null) !== (p.caption_top ?? null)) {
+        const res = await fetch(`/api/admin/comic-pages/${pid}`, {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify({ caption: p.caption_top ?? null, slot: 'top' }),
+        })
+        if (!res.ok) throw new Error(`undo caption slot answered ${res.status}`)
+      }
+      if ((base.caption_bottom ?? null) !== (p.caption_bottom ?? null)) {
+        const res = await fetch(`/api/admin/comic-pages/${pid}`, {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify({ caption: p.caption_bottom ?? null, slot: 'bottom' }),
+        })
+        if (!res.ok) throw new Error(`undo caption slot answered ${res.status}`)
+      }
+    }
+    // 4) Order — ONE reorder with the complete target set (the server
+    //    requires the exact current full set; 0 pages → nothing to reorder).
+    if (target.pages.length > 0) {
+      const orderedIds = target.pages.map(p => (createdMap.get(p.id) || p.id))
+      const res = await fetch(`/api/admin/comics/${cid}/reorder`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ page_ids: orderedIds }),
+      })
+      if (!res.ok) throw new Error(`undo reorder answered ${res.status}`)
+    }
+    // 5) Theme (partial PUT; an explicit null CLEARS it).
+    if ((cur.theme ?? null) !== (target.theme ?? null)) {
+      const res = await fetch(`/api/admin/comics/${cid}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ theme_colour: target.theme ?? null }),
+      })
+      if (!res.ok) throw new Error(`undo theme answered ${res.status}`)
+    }
+    // 6) Local mirror — the editor's own optimistic shape (other comics
+    //    untouched; the validity effect reconciles selection + active page).
+    //    Sync the REFS immediately, not just setState: a chained undo/redo
+    //    (the shared chain may run it before this render commits) reads the
+    //    refs through docSnapshot — with the old effect-only sync it saw the
+    //    PRE-APPLY state and no-op'd (the R7B-7 redo that deleted nothing).
+    const others = (pagesRef.current || []).filter(p => p.comic_id !== cid)
+    const applied = target.pages.map((p, i) => ({
+      id: createdMap.get(p.id) || p.id,
+      comic_id: cid,
+      page_number: i + 1,
+      file_path: p.file_path ?? null,
+      caption: p.caption ?? null,
+      caption_top: p.caption_top ?? null,
+      caption_bottom: p.caption_bottom ?? null,
+      caption_position: p.caption_position || 'top',
+    }))
+    const nextPages = [...others, ...applied]
+    pagesRef.current = nextPages
+    setPages(nextPages)
+    if ((cur.theme ?? null) !== (target.theme ?? null)) {
+      const nextComics = (comicsRef.current || []).map(c => (c.id === cid ? { ...c, theme_colour: target.theme ?? null } : c))
+      comicsRef.current = nextComics
+      setComics(nextComics)
+    }
+  }, [csrfToken, docSnapshot])
+
+  const performUndo = useCallback(() => {
+    const run = async () => {
+      // In-flight guard (checked at EXECUTION time — the chain may have queued
+      // us behind an earlier action, so the state can have changed since the
+      // keystroke): never undo while a commit is landing (its pending entry
+      // is unsettled — the drain would race).
+      if (uploadingRef.current || reorderingRef.current) return
+      if (pendingRef.current.some(p => p.settled === undefined)) return
+      // Cross-comic: discard entries whose comic no longer exists (discard +
+      // continue — the stack stays usable), take the top live one.
+      while (historyRef.current.length > 0 && !comicExists(historyRef.current[historyRef.current.length - 1].comicId)) {
+        historyRef.current.pop()
+      }
+      const entry = historyRef.current[historyRef.current.length - 1]
+      if (!entry) return                                 // empty stack → no-op
+      if (entry.comicId !== selectedIdRef.current) {
+        selectedIdRef.current = entry.comicId            // sync the ref NOW (a chained run may read it before this render)
+        setSelectedId(entry.comicId)                     // switch FIRST, then apply
+      }
+      try {
+        await applyDoc(entry.comicId, entry.before)
+      } catch (err) {
+        setError(`Undo failed — ${err.message}`)
+        return                                            // the entry stays → retryable
+      }
+      historyRef.current.pop()
+      redoRef.current.push(entry)
+    }
+    return enqueueHistory(run)
+  }, [applyDoc, setError, selectedIdRef])
+
+  const performRedo = useCallback(() => {
+    const run = async () => {
+      // Same execution-time guards + the same shared chain as performUndo —
+      // an in-flight undo must finish (pop + bookkeeping) before a redo runs.
+      if (uploadingRef.current || reorderingRef.current) return
+      if (pendingRef.current.some(p => p.settled === undefined)) return
+      while (redoRef.current.length > 0 && !comicExists(redoRef.current[redoRef.current.length - 1].comicId)) {
+        redoRef.current.pop()
+      }
+      const entry = redoRef.current[redoRef.current.length - 1]
+      if (!entry) return                                 // empty redo → no-op
+      if (entry.comicId !== selectedIdRef.current) {
+        selectedIdRef.current = entry.comicId            // sync the ref NOW (a chained run may read it before this render)
+        setSelectedId(entry.comicId)                     // switch FIRST, then apply
+      }
+      try {
+        await applyDoc(entry.comicId, entry.after)
+      } catch (err) {
+        setError(`Redo failed — ${err.message}`)
+        return
+      }
+      redoRef.current.pop()
+      historyRef.current.push(entry)
+    }
+    return enqueueHistory(run)
+  }, [applyDoc, setError, selectedIdRef])
+
+  // Bind the handlers (house pattern — the listener is bound once and reads
+  // the freshest handlers through the ref).
+  const undoRedoRef = useRef({ undo: null, redo: null })
+  useEffect(() => { undoRedoRef.current = { undo: performUndo, redo: performRedo } }, [performUndo, performRedo])
+
+  useEffect(() => {
+    const inField = (el) => (el instanceof HTMLElement && (
+      el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable))
+    const onKey = (e) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return
+      const k = String(e.key || '').toLowerCase()
+      if (k !== 'z' && k !== 'y') return
+      const wantUndo = (k === 'z' && !e.shiftKey)
+      const wantRedo = (k === 'y') || (k === 'z' && e.shiftKey)
+      if (!wantUndo && !wantRedo) return
+      // Contract 1 — while focus is in a text field the editor's stack is
+      // ignored: the field's own (native) undo/redo stays intact.
+      if (inField(document.activeElement) || inField(e.target)) return
+      e.preventDefault()
+      const fn = wantUndo ? undoRedoRef.current.undo : undoRedoRef.current.redo
+      if (fn) void fn()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   // Step 7 — two-way sync, list → preview: a click makes that page the active
   // one and centres its figure inside the preview window. Step 12.5b adds the
   // MULTI-SELECT (a PLAIN click = the single page; a Ctrl/Cmd+click TOGGLES
@@ -791,6 +1173,9 @@ export default function ComicEditor({
       setError('No image files in that batch — only image files are added as pages.')
       return []
     }
+    // round 7b — the whole upload batch is ONE undo entry (a partial batch
+    // keeps its entry: the pages that landed are a real, undoable state).
+    beginComposite()
     uploadingRef.current = true
     setUploading(true)
     setError(null)
@@ -831,6 +1216,7 @@ export default function ComicEditor({
       setUploading(false)
       setUploadMsg('')
     }
+    endComposite()
     return newPages
   }, [selectedId, selectedPages, comics, csrfToken])
 
@@ -1358,6 +1744,9 @@ export default function ComicEditor({
     // (Fixed: was `!==` + `||`, which wrongly no-op'd whenever the length
     // differed — e.g. Step 14's insert-after-upload. Now matches the comment.)
     if (newOrder.length === currentOrder.length && currentOrder.every((id, i) => id === newOrder[i])) return
+    // round 7b — the reorder is ONE action (suppressed inside a composite,
+    // which then owns the entry).
+    const hist = beginAction()
     const prevPages = pages                     // the rollback snapshot (pre-optimistic)
     // Optimistic apply: renumber this comic's pages 1..n in the new order.
     // The rest of `pages` (other comics) is untouched.
@@ -1378,9 +1767,11 @@ export default function ComicEditor({
         throw new Error(data.error || `reorder answered ${res.status}`)
       }
       setNotice('Pages reordered.')
+      settleEntry(hist, true)
     } catch (err) {
       setPages(prevPages)                       // roll the optimistic order back
       setError(err.message)
+      settleEntry(hist, false)
     } finally {
       reorderingRef.current = false
       setReordering(false)
@@ -1589,6 +1980,20 @@ export default function ComicEditor({
 
   const saveCaption = useCallback(async (pageId, slot, value) => {
     const next = (value == null || String(value).trim() === '') ? null : value
+    // round 7b — consume this burst's undo entry (registered in
+    // onCaptionChange, on the FIRST keystroke — the `before` snapshot is
+    // still the pre-typing state there). For a programmatic save without a
+    // burst, register one now. Inside a composite both are null — the
+    // composite owns the entry (settleEntry(null, …) is a no-op).
+    const histKey = `${pageId}:${slot}`
+    let histEntry
+    const hadBurst = histKey in captionBurstRef.current
+    if (hadBurst) {
+      histEntry = captionBurstRef.current[histKey]
+      delete captionBurstRef.current[histKey]
+    } else {
+      histEntry = beginAction()
+    }
     setCaptionSave('saving')
     setCaptionError(null)
     try {
@@ -1607,10 +2012,12 @@ export default function ComicEditor({
         throw new Error(data.error || `save caption answered ${res.status}`)
       }
       setCaptionSave('saved')
+      settleEntry(histEntry, true)
       return true
     } catch (err) {
       setCaptionSave('error')
       setCaptionError(err.message)
+      settleEntry(histEntry, false)
       return false
     }
   }, [csrfToken])
@@ -1625,6 +2032,12 @@ export default function ComicEditor({
     if (captionSave === 'error') setCaptionSave(null)  // re-typing clears the stale error status
     const timers = captionTimers.current
     const key = `${page.id}:${slot}`
+    // round 7b — register the burst's undo entry ONCE, on the FIRST
+    // keystroke: the snapshot taken here is still the pre-typing state (the
+    // correct `before` — by saveCaption time the text is already in state).
+    // Later keystrokes reuse it; saveCaption consumes it. Suppressed inside
+    // a composite (the composite owns the entry).
+    if (!(key in captionBurstRef.current)) captionBurstRef.current[key] = beginAction()
     if (timers[key]) { clearTimeout(timers[key]); delete timers[key] }
     timers[key] = setTimeout(() => {
       delete timers[key]
@@ -1727,8 +2140,21 @@ export default function ComicEditor({
     const page = selectedPages.find(p => p.id === pageId)
     if (!page) return false
     if (!opts.skipConfirm) {
-      const ok = window.confirm(`Delete page ${page.page_number} (${fileNameOf(page.file_path)})?\nThe remaining pages renumber — this cannot be undone.`)
+      const ok = window.confirm(`Delete page ${page.page_number} (${fileNameOf(page.file_path)})?\nThe remaining pages renumber — you can undo with Ctrl+Z.`)
       if (!ok) return false
+    }
+    // round 7b — the delete is ONE action (suppressed inside a composite,
+    // which owns the entry).
+    const hist = beginAction()
+    // round 7b — a caption burst registered for THIS page (typed text whose
+    // save hasn't landed) dies with the page: settle it as failed so it
+    // leaves no phantom entry and can't linger unsettled and block undo.
+    // (Composite case: the burst value is null → settleEntry is a no-op.)
+    for (const bk of Object.keys(captionBurstRef.current)) {
+      if (bk.startsWith(`${pageId}:`)) {
+        settleEntry(captionBurstRef.current[bk], false)
+        delete captionBurstRef.current[bk]
+      }
     }
     setDeleting(true)
     setError(null)
@@ -1767,10 +2193,12 @@ export default function ComicEditor({
       setNotice(data.count !== undefined
         ? `Deleted page ${page.page_number} — ${data.count} page${data.count === 1 ? '' : 's'} left.`
         : `Deleted page ${page.page_number}.`)
+      settleEntry(hist, true)
       return true
     } catch (err) {
       setPages(prevPages)
       setError(err.message)
+      settleEntry(hist, false)
       return false
     } finally {
       setDeleting(false)
@@ -1800,11 +2228,15 @@ export default function ComicEditor({
     const page = selectedPages.find(x => x.id === pageId)
     if (!page) return false
     const ok = window.confirm(
-      `Delete the caption on page ${page.page_number}?\nThis cannot be undone.`,
+      `Delete the caption on page ${page.page_number}?\nYou can undo with Ctrl+Z.`,
     )
     if (!ok) return false
     const field = slotOf(slot)
     const key = `${pageId}:${slot}`
+    // round 7b — register the burst's entry BEFORE the local state moves
+    // (the text must still be in state for the `before` snapshot); the save
+    // below consumes it (suppressed → null inside a composite).
+    if (!(key in captionBurstRef.current)) captionBurstRef.current[key] = beginAction()
     const timers = captionTimers.current
     if (timers[key]) { clearTimeout(timers[key]); delete timers[key] }
     setPages(prev => prev.map(x => (x.id === pageId ? { ...x, [field]: null } : x)))
@@ -1827,6 +2259,8 @@ export default function ComicEditor({
   const insertCaptionPageAt = useCallback(async (slot, srcPageId = null, srcText = null, srcSlot = null) => {
     if (selectedId === null) { setError('Select a comic first.'); return null }
     if (reorderingRef.current) return null
+    // round 7b — POST + reorder (+ carry-over save/clear) is ONE action.
+    beginComposite()
     const mine = selectedPages
     const nextNumber = mine.reduce((m, p) => Math.max(m, Number(p.page_number) || 0), 0) + 1
     let newPage = null
@@ -1844,6 +2278,7 @@ export default function ComicEditor({
       newPage = { id: created.id, comic_id: selectedId, page_number: nextNumber, file_path: null, caption: null, caption_position: 'page' }
     } catch (err) {
       setError(err.message)
+      endComposite()
       return null
     }
     // New order: the comic's complete page set with the caption page spliced
@@ -1879,6 +2314,7 @@ export default function ComicEditor({
     scrollActiveRef.current = true
     setActivePageId(newPage.id)
     setSelectedIds([newPage.id])
+    endComposite()
     return newPage
   }, [selectedId, selectedPages, csrfToken, reorder, setError, setPages, setNotice, saveCaption, setActivePageId, setSelectedIds, scrollActiveRef, reorderingRef, captionTimers, setCaptionEditId])
 
@@ -1914,6 +2350,8 @@ export default function ComicEditor({
   // no reorder — the caller reorders once at the end).
   const createCaptionPageAtNumber = useCallback(async (pageNumber) => {
     if (selectedId === null) return null
+    // round 7b — the create is ONE action (suppressed inside a composite).
+    const hist = beginAction()
     try {
       const res = await fetch('/api/admin/comic-pages', {
         method: 'POST',
@@ -1927,9 +2365,11 @@ export default function ComicEditor({
       const created = await res.json().catch(() => ({}))
       const row = { id: created.id, comic_id: selectedId, page_number: pageNumber, file_path: null, caption: null, caption_position: 'page' }
       setPages(prev => [...prev, row])
+      settleEntry(hist, true)
       return row
     } catch (err) {
       setError(err.message)
+      settleEntry(hist, false)
       return null
     }
   }, [selectedId, csrfToken, setPages, setError])
@@ -1937,6 +2377,8 @@ export default function ComicEditor({
   // A MEDIA page (one uploaded image) at a SPECIFIC page_number.
   const createMediaPageAt = useCallback(async (file, pageNumber) => {
     if (selectedId === null) return null
+    // round 7b — the create is ONE action (suppressed inside a composite).
+    const hist = beginAction()
     try {
       const up = await uploadImage(file, csrfToken)
       const res = await fetch('/api/admin/comic-pages', {
@@ -1951,9 +2393,11 @@ export default function ComicEditor({
       const created = await res.json()
       const row = { id: created.id, comic_id: selectedId, page_number: pageNumber, file_path: up.file_path, caption: null }
       setPages(prev => [...prev, row])
+      settleEntry(hist, true)
       return row
     } catch (err) {
       setError(err.message)
+      settleEntry(hist, false)
       return null
     }
   }, [selectedId, csrfToken, uploadImage, setPages, setError])
@@ -1963,9 +2407,12 @@ export default function ComicEditor({
   // active page, or the active page is already the last, the append IS the
   // target position — no reorder needed (the file-picker's behaviour).
   const addPasteImageAfterActive = useCallback(async (files) => {
+    // round 7b — upload + reorder is ONE action (the inner addFiles/reorder
+    // are composites/actions that suppress themselves inside this one).
+    beginComposite()
     const original = selectedPagesRef.current   // the set BEFORE addFiles creates
     const newPages = await addFiles(files)
-    if (!newPages || newPages.length === 0) return
+    if (!newPages || newPages.length === 0) { endComposite(); return }
     const activeId = activePageIdRef.current
     const idx = (activeId != null) ? original.findIndex(p => p.id === activeId) : -1
     // "After the active page" — when there's no active page, or the active page
@@ -1977,6 +2424,7 @@ export default function ComicEditor({
     scrollActiveRef.current = true
     setActivePageId(newPages[0].id)
     setSelectedIds([newPages[0].id])
+    endComposite()
   }, [addFiles, reorder, activePageIdRef, selectedPagesRef, scrollActiveRef, setActivePageId, setSelectedIds])
 
   const handlePaste = useCallback((e) => {
@@ -2014,12 +2462,15 @@ export default function ComicEditor({
         capPageId = Number(String(captionEditId).slice(0, -':page'.length))
       }
       if (capPageId == null) { setError('Paste target not found.'); return }
+      // round 7b — the whole split (creates + reorder + delete + seeds) is
+      // ONE action; every exit settles it below.
+      beginComposite()
       void (async () => {
         // Flush any pending caption debounce on that page (house pattern) so a
         // stale save can't race the split.
         flushCaptionTimer(capPageId)
         const capPage = selectedPagesRef.current.find(p => p.id === capPageId)
-        if (!capPage) return
+        if (!capPage) { endComposite(); return }
         const fullText = capPage.caption ?? ''
         const caret = (capInputEl.selectionStart != null) ? capInputEl.selectionStart : fullText.length
         const caretPos = Math.max(0, Math.min(caret, fullText.length))
@@ -2029,8 +2480,10 @@ export default function ComicEditor({
         const hasAfter = after.trim() !== ''
         if (!hasBefore && !hasAfter) {
           // Empty caption — nothing to split; just add the media after the
-          // active page (the plain image-paste case).
+          // active page (the plain image-paste case). Its own composite
+          // nests inside this one (suppressed — the outer entry owns it).
           await addPasteImageAfterActive(files)
+          endComposite()
           return
         }
         // Fresh, collision-free numbers (UNIQUE(comic_id,page_number)).
@@ -2041,7 +2494,7 @@ export default function ComicEditor({
         const numAfter = hasAfter ? (numBefore != null ? n + 3 : n + 2) : null
         // 1. The media page (upload + POST at a reserved number).
         const mediaPage = await createMediaPageAt(files[0], numMedia)
-        if (!mediaPage) return
+        if (!mediaPage) { endComposite(); return }
         // 2. "before" caption page (created blank — the text is seeded below).
         let beforePage = null
         if (hasBefore) beforePage = await createCaptionPageAtNumber(numBefore)
@@ -2082,6 +2535,7 @@ export default function ComicEditor({
         scrollActiveRef.current = true
         setActivePageId(mediaPage.id)
         setSelectedIds([mediaPage.id])
+        endComposite()
       })()
       return
     }
@@ -2098,6 +2552,9 @@ export default function ComicEditor({
     // field). Only when focus is NOT in a text field do we intercept.
     if (inTextField) return
     if (typeof e.preventDefault === 'function') e.preventDefault()
+    // round 7b — the new caption page + its pasted text is ONE action
+    // (insertCaptionPageAt's composite nests inside this one — suppressed).
+    beginComposite()
     void (async () => {
       const activeId = activePageIdRef.current
       const mine = selectedPagesRef.current
@@ -2110,6 +2567,7 @@ export default function ComicEditor({
         setPages(prev => prev.map(p => (p.id === newPage.id ? { ...p, caption: text } : p)))
         await saveCaption(newPage.id, 'page', text)
       }
+      endComposite()
     })()
   }, [selectedId, uploadingRef, reorderingRef, captionEditId, activePageIdRef, selectedPagesRef, scrollActiveRef,
       createCaptionPageAtNumber, createMediaPageAt, addPasteImageAfterActive, insertCaptionPageAt,
@@ -2141,6 +2599,11 @@ export default function ComicEditor({
     const pages = selectedPagesRef.current
     const srcPage = pages.find(p => p.id === src.pageId)
     if (!srcPage) return
+    // round 7b — the WHOLE drop (merge + clear/delete, or the slot
+    // insert/move) is ONE action; the try/finally settles it on EVERY exit
+    // (11 of them — none can be missed).
+    beginComposite()
+    try {
     const srcText = String(src.text ?? '').trim()
 
     // --- { slotVisible } → { slot } (normalize onto the full list) ---------
@@ -2257,6 +2720,9 @@ export default function ComicEditor({
       await reorder(ordered)
       return
     }
+    } finally {
+      endComposite()
+    }
   }, [selectedPagesRef, visiblePagesRef, flushCaptionTimer, saveCaption, setPages, setCaptionEditId, deletePage, insertCaptionPageAt, reorder, reorderingRef, setError, setNotice, captionTimers, captionEditId])
 
   // Bind the ref the drop handlers read (they're declared above, this below —
@@ -2279,6 +2745,9 @@ export default function ComicEditor({
     if (idx === -1) return
     const target = nearestCaptionPage(mine, pageId)
     if (!target) { setError('No adjacent caption page to merge into.'); return }
+    // round 7b — the merge (save + delete) is ONE action; both exits below
+    // settle it.
+    beginComposite()
     const srcText = String(mine[idx].caption || '').trim()
     const dstText = String(target.caption || '').trim()
     const merged = [srcText, dstText].filter(Boolean).join('\n')
@@ -2294,6 +2763,7 @@ export default function ComicEditor({
         // The save FAILED — the caption page is KEPT (deleting it would lose
         // its text, and the target never received the merged text either).
         setError('The merged caption could not be saved — the caption page was kept.')
+        endComposite()
         return
       }
       // saveCaption PATCHes the server; mirror the merged text locally so
@@ -2309,6 +2779,7 @@ export default function ComicEditor({
     if (!deleted && changed) {
       setError(`The caption was merged into page ${target.page_number} — the caption page was kept (its delete was cancelled). Delete it from its bin if you want it gone.`)
     }
+    endComposite()
   }, [selectedPages, nearestCaptionPage, flushCaptionTimer, saveCaption, deletePage, setError, setPages, captionEditId, setCaptionEditId])
 
   // B2.5 Step 15 (folded into B18), reworked in B18 round 2 substep 7: the
@@ -2322,6 +2793,10 @@ export default function ComicEditor({
   const themeDropperRef = useRef(null)             // the hidden <input type="color"> (the no-EyeDropper fallback — round 6 pt 4)
   const setThemeColour = useCallback((value) => {
     if (selectedId === null) return
+    // round 7b — register the theme burst's undo entry ONCE (undefined =
+    // unregistered; suppressed → null inside a composite). The debounced PUT
+    // settles it — the `before` snapshot here is still the pre-pick colour.
+    if (themeBurstRef.current === undefined) themeBurstRef.current = beginAction()
     setError(null)
     setComics(prev => prev.map(c => (c.id === selectedId ? { ...c, theme_colour: value } : c)))
     if (themeTimer.current) { clearTimeout(themeTimer.current); themeTimer.current = null }
@@ -2337,7 +2812,16 @@ export default function ComicEditor({
           const data = await res.json().catch(() => ({}))
           throw new Error(data.error || `set theme colour answered ${res.status}`)
         }
+        // round 7b — the PUT landed: settle the theme burst as successful.
+        const entry = themeBurstRef.current
+        themeBurstRef.current = undefined
+        settleEntry(entry, true)
       } catch (err) {
+        // round 7b — the PUT failed: settle the burst as failed (discarded —
+        // no phantom entry). The optimistic value stays (retry/clear to fix).
+        const entry = themeBurstRef.current
+        themeBurstRef.current = undefined
+        settleEntry(entry, false)
         setError(err.message)   // the optimistic value stays (retry/clear to fix)
       }
     }, 400)
@@ -2469,9 +2953,22 @@ export default function ComicEditor({
     const numbers = targets.map(p => p.page_number)
     const ok = window.confirm(
       `Delete ${targets.length} page${targets.length === 1 ? '' : 's'} (pages ${numbers.join(', ')})?`
-      + '\nThe remaining pages renumber — this cannot be undone.',
+      + '\nThe remaining pages renumber — you can undo with Ctrl+Z.',
     )
     if (!ok) return
+    // round 7b — the whole batch is ONE action (a partial batch keeps its
+    // entry: the pages that landed are a real, undoable state).
+    const hist = beginAction()
+    // round 7b — caption bursts registered for ANY deleted page die with the
+    // page: settle them as failed (no phantom entry, no unsettled block).
+    for (const t of targets) {
+      for (const bk of Object.keys(captionBurstRef.current)) {
+        if (bk.startsWith(`${t.id}:`)) {
+          settleEntry(captionBurstRef.current[bk], false)
+          delete captionBurstRef.current[bk]
+        }
+      }
+    }
     setDeleting(true)
     setError(null)
     const prevPages = pages                    // pre-batch snapshot (the rollback target)
@@ -2498,9 +2995,11 @@ export default function ComicEditor({
       setNotice(finalCount !== undefined
         ? `Deleted ${targets.length} page${targets.length === 1 ? '' : 's'} — ${finalCount} page${finalCount === 1 ? '' : 's'} left.`
         : `Deleted ${targets.length} page${targets.length === 1 ? '' : 's'}.`)
+      settleEntry(hist, true)
     } catch (err) {
       setPages(prevPages)                      // roll the whole batch back
       setError(err.message)
+      settleEntry(hist, false)
     } finally {
       setDeleting(false)
     }
