@@ -3525,7 +3525,7 @@ export default function ComicEditor({
                       onDrop={e => onRowDrop(e)}
                     >
                       {p.file_path
-                        ? <img src={p.file_path} alt={`Page ${p.page_number}`} />
+                        ? <img src={p.file_path} alt={`Page ${p.page_number}`} draggable={false} />
                         : (
                           /* B18 round 2, substep 2 — the caption tile carries
                              the comic's theme colour (inline, so it can't be
@@ -3973,7 +3973,7 @@ export default function ComicEditor({
                             disabled={deleting}
                             onClick={e => { e.stopPropagation(); deletePage(p.id) }}
                           />
-                          <img className="preview-thumb" src={p.file_path} alt={`Page ${p.page_number}`} />
+                          <img className="preview-thumb" src={p.file_path} alt={`Page ${p.page_number}`} draggable={false} />
                           {plusButtons}
                         </div>
                       )
