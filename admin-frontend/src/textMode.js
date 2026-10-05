@@ -12,6 +12,12 @@
 //                        AFTER it.
 //   --- <prose> ---      a CAPTION PAGE (a page with no media), fenced
 //                        between two `---` divider lines.
+//   %% ... %%            a COMMENT (round 6): visible in the text pane, but
+//                        STRIPPED before parsing / applying / copying — it
+//                        never renders in the preview, never applies to the
+//                        comic, and is lost when the text refreshes. Use it
+//                        for agent-generated prompts (danbooru / minimax h3)
+//                        that sit alongside the story.
 //
 // Everything else the owner types is PROSE: it is preserved in the text pane
 // but is NOT part of the comic model, so applying never creates or deletes
@@ -26,6 +32,75 @@ const MARKER_RE = /^\[media (\d+)\]\s*$/
 const FENCE_RE = /^\s*---\s*$/
 const CAP_RE = /^>\s?(.*)$/
 const isBlank = (s) => s.trim() === ''
+
+// --- B18 round 6 — COMMENT-OUT PUNCTUATION ----------------------------------
+// `%% ... %%` — a BLOCK COMMENT (multi-line capable). Anything between `%%`
+// (inclusive) is STRIPPED before parsing / applying / copying: it is visible
+// in the text pane (the owner can edit it) but never rendered in the preview,
+// never applied to the comic, and never copied. Intended for agent-generated
+// prompts (danbooru tags, minimax h3 prompts, etc.) that the owner wants to
+// keep alongside the story without affecting the comic.
+//
+// The regex matches the FIRST `%%` and the NEXT `%%` (non-greedy), so
+// `%% foo %% bar %% baz %%` strips `%% foo %%` and `%% baz %%` (leaving
+// ` bar `). Unmatched `%%` (no closing delimiter) is left as-is (prose).
+const COMMENT_RE = /%%[\s\S]*?%%/g
+
+// stripComments(md) → the markdown with all `%% ... %%` blocks removed. A
+// comment line (a line that is entirely a comment, or part of a multi-line
+// comment) is removed ENTIRELY (not just the comment part), so the blocks
+// before and after the comment remain adjacent (no blank line between them —
+// a blank line would separate a caption from its marker, breaking the
+// caption-claiming logic). A comment in the MIDDLE of a line is removed
+// (the rest of the line is kept).
+export function stripComments(md) {
+  const lines = String(md).split('\n')
+  const out = []
+  let inComment = false
+  for (const line of lines) {
+    if (inComment) {
+      // We are inside a multi-line comment (the opening %% was on a previous
+      // line). Look for the closing %% on this line.
+      const close = line.indexOf('%%')
+      if (close === -1) continue   // still inside the comment
+      const after = line.slice(close + 2)
+      inComment = false
+      if (after.trim() !== '') out.push(after.trim())
+      // If `after` is blank, the line is entirely comment — skip it.
+    } else if (!line.includes('%%')) {
+      // No comment on this line — keep it EXACTLY (blank lines included: they
+      // carry meaning — a blank line separates a caption from its marker).
+      out.push(line)
+    } else {
+      // Strip every COMPLETE %% ... %% block on this line (there may be
+      // several), leaving the surrounding text intact. (matchAll — String.match
+      // with /g returns bare strings without .index.)
+      let kept = line
+      const matches = [...kept.matchAll(COMMENT_RE)]
+      if (matches.length > 0) {
+        let rebuilt = ''
+        let pos = 0
+        for (const m of matches) {
+          rebuilt += kept.slice(pos, m.index) + ' '
+          pos = m.index + m[0].length
+        }
+        rebuilt += kept.slice(pos)
+        kept = rebuilt
+      }
+      // A DANGLING %% (an open with no close on this line) starts a
+      // multi-line comment: keep the text before it, drop the rest.
+      const dangling = kept.indexOf('%%')
+      if (dangling !== -1) {
+        kept = kept.slice(0, dangling)
+        inComment = true
+      }
+      kept = kept.replace(/\s+/g, ' ').trim()
+      if (kept !== '') out.push(kept)
+      // If `kept` is blank, the line was entirely comment — skip it.
+    }
+  }
+  return out.join('\n')
+}
 
 // comicToMarkdown(pages) → { markdown, numberToPageId }
 //   pages            — the comic's pages in page_number order. A page is a
@@ -77,7 +152,9 @@ export function comicToMarkdown(pages) {
 // `>` line is a caption only when adjacent (no blank line) to a marker; a
 // fence must be well-formed (exactly three dashes) to delimit a caption page.
 export function markdownToBlocks(md) {
-  const lines = String(md).split('\n')
+  // B18 round 6 — strip comments (%% ... %%) BEFORE parsing: they are visible
+  // in the text pane but never rendered in the preview or applied to the comic.
+  const lines = stripComments(String(md)).split('\n')
   const n = lines.length
   const blocks = []
   const consumed = new Set()
@@ -139,7 +216,9 @@ export function markdownToBlocks(md) {
 // [media x] / [media ?] markers are all stripped, leaving the plain prose +
 // caption text (the actual words, in order). Blank runs are collapsed.
 export function toPlainText(md) {
-  return String(md)
+  // B18 round 6 — strip comments (%% ... %%) BEFORE converting: they are never
+  // copied (the owner wants the actual words, not the agent prompts).
+  return stripComments(String(md))
     .split('\n')
     .map((line) => {
       const cap = line.match(CAP_RE)

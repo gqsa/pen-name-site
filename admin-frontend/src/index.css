@@ -175,31 +175,53 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    window, Ctrl+wheel zooms the tiles. */
 .pages-section { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
 
-/* B18 round 5 — the Tiles ↔ Text mode bar + the text pane. The mode bar is a
-   slim flex row above the surface; the text pane flex-fills the remaining
-   section height (the section is now a flex column) so the textarea grows
-   with the window instead of a fixed 12 rows. */
-.mode-bar { display: flex; align-items: center; gap: 10px; margin: 2px 0 10px; }
-.mode-toggle { padding: 5px 14px; font-size: 13px; background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; font-weight: 600; }
+/* B18 round 6 — the UNIFIED heading row (both modes), replacing the old
+   mode-bar + text-pane-toolbar + pages-heading (issues 1/4/5). A three-column
+   grid — left / centre / right — so the centred title is TRULY centred over
+   the surface regardless of the differing widths of the two sides. The text
+   pane still flex-fills the section height (the section is a flex column),
+   so the textarea grows with the window. */
+.editor-heading { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; margin: 16px 0 10px; }
+.editor-heading .heading-left { justify-self: start; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.editor-heading .heading-title { justify-self: center; margin: 0; font-size: 1.02rem; white-space: nowrap; text-align: center; }
+.editor-heading .heading-right { justify-self: end; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* Issue 1 — the Text Mode toggle is a PILL (reusing .preview-toggle), always
+   saying "Text Mode": greyed when off, highlighted when on. The base class
+   only carries the cursor + the unsaved-animation hook (the pill look comes
+   from .preview-toggle / .preview-toggle--on). */
+.mode-toggle { cursor: pointer; }
 .mode-toggle:hover { border-color: var(--accent); }
-.mode-toggle--text { background: var(--accent); color: #fff; border-color: var(--accent); }
-/* The toggle is RED when the shared draft (unsaved text-mode edits) exists —
-   the cross-browser signal the spec asks for. */
-.mode-toggle--unsaved { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
-.mode-toggle--unsaved.mode-toggle--text { color: #fff; }
+/* Issue 4 — the unsaved indicator is a SLOW BLACK→RED pulse on the toggle
+   (one consistent spot, next to the badge). The off-state pulse reads
+   literally black→red; the on-state pulse stays within the accent family so
+   it never flashes against the highlighted pill. */
+.mode-toggle--unsaved { animation: unsaved-pulse 2.6s ease-in-out infinite; }
+@keyframes unsaved-pulse {
+  0%, 100% { border-color: #000; color: var(--muted); background: #0d0d0d; }
+  50% { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+}
+.mode-toggle--unsaved.preview-toggle--on { animation-name: unsaved-pulse-on; }
+@keyframes unsaved-pulse-on {
+  0%, 100% { border-color: var(--accent); color: var(--ink); background: var(--accent-soft); }
+  50% { border-color: var(--accent); color: #fff; background: var(--accent); }
+}
 .unsaved-badge { color: var(--accent); font-size: 12px; font-weight: 600; }
-.text-pane-toolbar { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; flex-wrap: wrap; }
 .text-btn { padding: 6px 14px; font-size: 13px; background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; font-weight: 600; }
 .text-btn:hover { border-color: var(--accent); }
 .text-btn--primary { background: var(--accent); color: #fff; border-color: var(--accent); }
 .text-btn--primary:hover { filter: brightness(1.1); }
 .auto-update { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; margin: 0; }
 .auto-update input { width: auto; margin: 0; }
-.text-dirty { color: var(--accent); font-size: 12px; font-weight: 600; }
+
 .text-pane { flex: 1 1 auto; min-height: 120px; width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: #141414; color: var(--ink); font: 14px/1.55 ui-monospace, "Cascadia Code", "Consolas", monospace; resize: vertical; white-space: pre; }
 .text-pane:focus { outline: none; border-color: var(--accent); }
-/* The comic list: a comic with unsaved text-mode edits is listed in RED (the
-   cross-browser signal). A leading marker survives OS-drawn dropdowns. */
+/* B18 round 6, issue 7 — the unsaved comic is RED the moment it shows, not
+   only on hover. The closed <select> control (always visible) turns red when
+   the SELECTED comic has unsaved edits; the option itself also carries an
+   inline red (Chromium's list honours it) plus the leading "● " marker, which
+   survives OS-drawn dropdowns that ignore both. */
+.comic-select { border-radius: 6px; }
+.comic-select--unsaved { border-color: var(--accent); color: var(--accent); font-weight: 700; box-shadow: 0 0 0 1px var(--accent-soft); }
 .comic-option--unsaved { color: var(--accent); font-weight: 700; }
 /* B18 round 5 — the Update/Discard + Review/Discard prompt overlays. */
 .modal-overlay { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, .62); padding: 16px; }
@@ -210,6 +232,10 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 .modal-actions .btn--primary { background: var(--accent); color: #fff; border: 1px solid var(--accent); padding: 9px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
 .modal-actions .btn--danger { background: #d64545; color: #fff; border: 1px solid #d64545; padding: 9px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
 .modal-actions .btn--danger:hover { background: #b93a3a; }
+/* B18 round 6, issue 8 — the neutral "Cancel" in the reusable confirm modal
+   (the destructive action carries the red / accent). */
+.modal-actions .btn--neutral { background: var(--card); color: var(--ink); border: 1px solid var(--line); padding: 9px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+.modal-actions .btn--neutral:hover { border-color: var(--muted); }
 
 /* Left pane — the PAGES WINDOW (Step 9): a grid of fixed SQUARE (1:1) tiles,
    so many pages are visible at once (≥5/row at the editor's width) — no
@@ -273,6 +299,10 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    FAILED-save cue keeps the block style (it stays beside the box it
    belongs to). */
 .preview-heading .caption-status { display: inline-block; margin: 0 0 0 10px; vertical-align: middle; font-size: 12px; }
+/* B18 round 6, issue 6a — the Preview heading row is a flex line so the
+   Delete pill (`.pages-delete-btn`, `margin-left: auto`) sits top-RIGHT, on
+   the same line as "active page only", visible in BOTH modes. */
+.preview-heading { display: flex; align-items: center; gap: 8px; }
 
 /* Step 12.5a — the delete affordances (replaces the Step-12 text button):
    a hover trash bin on each PREVIEW page (top-right, slight overhang), on
@@ -310,11 +340,10 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
 /* the list-row bin sits at the row's right edge, vertically centred. */
 .page-list-item .page-bin { top: 50%; right: 5px; transform: translateY(-50%); width: 22px; height: 22px; }
 
-/* Step 12.5a — the Pages heading row: flex so the always-visible "Delete"
-   pill (bin icon + label, `.preview-toggle` pill family) sits right-aligned
-   — the h3 spans the section width, so its right edge IS the tiles' right
-   margin. */
-.pages-heading { display: flex; align-items: baseline; gap: 8px; margin: 18px 0 8px; }
+/* B18 round 6 — the "Delete" pill (bin icon + label, `.preview-toggle` pill
+   family). It now lives in the PREVIEW heading's top-right (issue 6a), on
+   the same line as "active page only", visible in BOTH modes; the pill's own
+   `margin-left: auto` right-aligns it in that flex row. */
 .pages-delete-btn {
   margin-left: auto;
   display: inline-flex; align-items: center; gap: 5px;

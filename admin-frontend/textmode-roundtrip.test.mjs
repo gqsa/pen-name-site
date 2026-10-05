@@ -1,4 +1,4 @@
-import { comicToMarkdown, markdownToBlocks, buildTargetDoc, toPlainText } from './src/textMode.js'
+import { comicToMarkdown, markdownToBlocks, buildTargetDoc, toPlainText, stripComments } from './src/textMode.js'
 import assert from 'node:assert/strict'
 
 let passed = 0
@@ -102,6 +102,73 @@ ok('toPlainText: strips > prefixes, --- fences, [media x] markers (the Copy butt
   assert.ok(!plain.includes('[media'))
   assert.ok(!plain.includes('>'))
   assert.ok(!plain.includes('---'))
+})
+
+// --- B18 round 6 — COMMENT-OUT PUNCTUATION (%% ... %%) ----------------------
+ok('stripComments: a single-line comment on its own line is removed (blocks stay adjacent)', () => {
+  const md = '[media 1]\n%% danbooru: 1girl, solo %%\n> cap'
+  assert.equal(stripComments(md), '[media 1]\n> cap')
+})
+
+ok('stripComments: a multi-line comment is removed entirely', () => {
+  const md = '%% minimax h3 prompt:\nline two\nline three %%\n[media 1]'
+  assert.equal(stripComments(md), '[media 1]')
+})
+
+ok('stripComments: an inline comment is removed, surrounding text kept', () => {
+  const md = '[media 1] %% tags: 1girl, solo %%'
+  assert.equal(stripComments(md), '[media 1]')
+  const md2 = 'foo %% hidden %% bar'
+  assert.equal(stripComments(md2), 'foo bar')
+})
+
+ok('stripComments: a dangling %% (no close) keeps text before it, drops the rest', () => {
+  assert.equal(stripComments('keep %% this is lost\nand lost too'), 'keep')
+})
+
+ok('parse: a comment between a marker and its caption does NOT break the caption', () => {
+  // The comment sits between [media 1] and its bottom caption; after stripping,
+  // the caption must still attach to the marker (no blank line between them).
+  const blocks = markdownToBlocks('[media 1]\n%% tags: 1girl, solo %%\n> bottom cap')
+  assert.equal(blocks.length, 1)
+  assert.equal(blocks[0].type, 'media')
+  assert.equal(blocks[0].bottom, 'bottom cap')
+  assert.equal(blocks[0].top, '')
+})
+
+ok('parse: comments are never prose, captions, or pages (invisible to the comic)', () => {
+  const blocks = markdownToBlocks('%% story notes %%\n\n[media 1]\n\n%% hidden page %%\n\n---\nreal prose\n---\n\n%% end %%')
+  // Only the media marker and the real caption page survive.
+  assert.equal(blocks.length, 2)
+  const media = blocks.filter((b) => b.type === 'media')
+  const caps = blocks.filter((b) => b.type === 'captionPage')
+  assert.equal(media.length, 1)
+  assert.equal(caps.length, 1)
+  assert.equal(caps[0].text, 'real prose')
+})
+
+ok('apply: comments in the text do not affect the target doc (same comic)', () => {
+  const { markdown, numberToPageId } = comicToMarkdown(pages)
+  const withComments = markdown
+    .replace('[media 1]', '[media 1]\n%% tags: 1girl, solo, blue eyes %%')
+    + '\n\n%% minimax h3: a girl walking in the rain, slow pan %%'
+  const blocks = markdownToBlocks(withComments)
+  const target = buildTargetDoc(blocks, numberToPageId, pages, '#fff')
+  assert.equal(target.pages.length, pages.length)
+  for (let i = 0; i < pages.length; i++) {
+    assert.equal(target.pages[i].id, pages[i].id)
+    assert.equal(target.pages[i].caption_top, pages[i].caption_top)
+    assert.equal(target.pages[i].caption_bottom, pages[i].caption_bottom)
+  }
+})
+
+ok('toPlainText: comments are never copied (the owner gets the words, not the prompts)', () => {
+  const md = '[media 1]\n%% danbooru: 1girl, solo %%\n> cap\n\n%% minimax h3: rain, slow pan %%'
+  const plain = toPlainText(md)
+  assert.ok(plain.includes('cap'))
+  assert.ok(!plain.includes('danbooru'))
+  assert.ok(!plain.includes('minimax'))
+  assert.ok(!plain.includes('%%'))
 })
 
 console.log(`\n${passed} passed`)

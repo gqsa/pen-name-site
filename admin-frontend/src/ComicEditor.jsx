@@ -629,6 +629,18 @@ export default function ComicEditor({
   // deferred edit (a no-arg thunk) that "Discard" will run.
   const [showGuard, setShowGuard] = useState(false)
   const guardActionRef = useRef(null)
+  // B18 round 6, issue 8 — the REUSABLE styled confirm modal (the house
+  // replacement for native window.confirm in this editor). `confirmReq` holds
+  // { title, message, confirmLabel, cancelLabel?, tone? ('danger'|'primary'),
+  // onConfirm, onCancel? } when a confirm is pending, else null. One generic
+  // modal (the same .modal-overlay/.modal-card as the text-mode prompts) is
+  // rendered from this single state; `showConfirm(opts)` opens it. The
+  // destructive action gets the red `.btn--danger`; "Cancel" is the neutral
+  // `.btn--neutral`. SITE-WIDE FOLLOW-UP (documented, owner's "option 1 …
+  // consistent everywhere + any future dialogues use the styled modal"):
+  // convert the remaining native confirm()/prompt() calls elsewhere in the
+  // admin app to this same pattern.
+  const [confirmReq, setConfirmReq] = useState(null)
   // Transient copy-button cue ("Copied.") that auto-hides after ~2 s.
   const [copyCue, setCopyCue] = useState(null)
   // The textarea contents mirrored to a ref (always current) so a debounced
@@ -640,10 +652,18 @@ export default function ComicEditor({
   // mode was entered — even after a reorder). Refreshed only on regeneration
   // events (entering text mode / a clean preview reorder / a Discard).
   const mediaNumberRef = useRef(new Map())
-  // The pending preview reorder (the NEW page order as page objects) the
-  // owner is about to commit while un-updated text changes exist. Discarding
-  // the modal applies it + regenerates the markdown; Updating ignores it.
-  const pendingReorderRef = useRef(null)
+  // The pending PREVIEW EDIT (a no-arg thunk: a caption commit, a reorder,
+  // a delete, an upload, a caption-page insert, ...) the owner is about to
+  // commit while un-updated text changes exist. Discarding the modal RUNS it
+  // + regenerates the markdown (the preview edit stands); Updating DROPS it
+  // (the text wins — applyDoc re-mirrors the local state to the text's
+  // version). The thunk is created at the call site (after the underlying
+  // action is declared), so it can capture the action directly.
+  const pendingActionRef = useRef(null)
+  // TRUE when the Update / Discard modal was opened by a TOGGLE-OFF (the owner
+  // is leaving text mode with un-updated changes): resolving it also exits to
+  // tiles. FALSE when opened by a preview edit (the owner stays in text mode).
+  const modalExitRef = useRef(false)
   // The debounced auto-update timer (autoUpdate ON).
   const autoUpdateTimer = useRef(null)
   // The textarea element (scroll-position preservation on regeneration).
@@ -651,10 +671,6 @@ export default function ComicEditor({
   // The comic id we already auto-restored text mode for (prevents the restore
   // effect from re-firing on every render once it has entered text mode).
   const autoRestoredRef = useRef(null)
-  // `reorder` is declared LATER (after the caption/selection machinery), so the
-  // early helpers (e.g. the modal Discard) reach it through this ref — a TDZ
-  // guard. It is assigned right after `reorder` is defined.
-  const reorderRef = useRef(null)
   // B18 round 5 — the FROZEN media number for a page (the reverse of
   // mediaNumberRef's number→pageId map), for the preview hover label in text
   // mode ("Media N"). null when the page has no frozen number (a caption page,
@@ -1173,16 +1189,21 @@ export default function ComicEditor({
     storeRememberedTextMode(selectedId, true)
   }, [selectedId, loadDraft, regenerateText])
 
-  // exitTextMode — toggle OFF: switching back to tiles APPLIES the text's state
-  // to the comic (an update event) when there are un-updated changes.
+  // exitTextMode — toggle OFF: switching back to tiles. If there are
+  // un-updated text changes, prompt the owner (Update = apply the text,
+  // Discard = discard the text's changes) — no silent apply.
   const exitTextMode = useCallback(async () => {
-    if (textDirty) await applyTextMode()
+    if (textDirty) {
+      modalExitRef.current = true
+      setShowTextModal(true)
+      return   // the modal resolves the exit (modalUpdate / modalDiscard)
+    }
     setTextMode(false)
     // The text-mode work session is over (the comic is the source of truth
     // again), so drop this browser's "remembered text mode" for the comic —
     // the next visit returns to tiles unless the owner re-enters text mode.
     if (selectedId !== null) storeRememberedTextMode(selectedId, false)
-  }, [textDirty, applyTextMode, selectedId])
+  }, [textDirty, selectedId])
 
   // handleModeToggle — the Tiles ↔ Text toggle (the round-5 primary control).
   const handleModeToggle = useCallback(async () => {
@@ -1255,38 +1276,80 @@ export default function ComicEditor({
     if (action) action()
   }, [clearDraftFn])
 
-  // --- B18 round 5 — the UPDATE / DISCARD modal (a preview reorder that
+  // --- B18 round 5 — the UPDATE / DISCARD modal (a preview EDIT that
   // conflicts with un-updated text, while in text mode) ---------------------
-  // beginTextModal — the owner dragged a preview reorder while in text mode
-  // with un-updated text. Park the pending order; show the modal.
-  const beginTextModal = useCallback((pendingPages) => {
-    pendingReorderRef.current = pendingPages
+  // beginTextModal — the owner attempted a preview edit (caption / reorder /
+  // delete / upload / caption-page) while in text mode with un-updated text.
+  // Park the pending action (a no-arg thunk); show the modal.
+  const beginTextModal = useCallback((actionThunk) => {
+    pendingActionRef.current = actionThunk
     setShowTextModal(true)
   }, [])
 
-  // modalUpdate — UPDATE: apply the markdown (an update event); the pending
-  // drag is NOT applied (the markdown wins).
+  // modalUpdate — UPDATE: the text's state is applied to the comic (an update
+  // event); the pending preview edit is DROPPED (the text wins — applyDoc
+  // re-mirrors the local state back to the text's version, so nothing on the
+  // text side is lost). If the modal was opened by a toggle-off, exit to tiles.
   const modalUpdate = useCallback(async () => {
+    const exit = modalExitRef.current
+    pendingActionRef.current = null
+    modalExitRef.current = false
     setShowTextModal(false)
-    pendingReorderRef.current = null
     await applyTextMode()
-  }, [applyTextMode])
-
-  // modalDiscard — DISCARD: apply the pending drag (the comic reorders), then
-  // regenerate the markdown from the new order (a regeneration event — numbers
-  // refresh). The pending order is applied via the existing `reorder` path.
-  const modalDiscard = useCallback(async () => {
-    const pending = pendingReorderRef.current
-    pendingReorderRef.current = null
-    setShowTextModal(false)
-    if (pending && pending.length && reorderRef.current) {
-      // The "apply the drag" half of the Discard: the plain reorder (NOT the
-      // guarded wrapper, so it does not re-trigger this modal). reorderRef is
-      // assigned right after `reorder` is defined (TDZ guard).
-      await reorderRef.current(pending)
+    if (exit) {
+      setTextMode(false)
+      if (selectedId !== null) storeRememberedTextMode(selectedId, false)
     }
-    await regenerateText()
-  }, [regenerateText])
+  }, [applyTextMode, selectedId])
+
+  // modalDiscard — DISCARD: the text's changes are discarded (the comic is the
+  // source of truth). If a pending preview edit exists, RUN it, then regenerate
+  // the markdown from the comic's new state (a regeneration event — numbers
+  // refresh). If the modal was opened by a toggle-off, just discard the text
+  // (no pending edit to run) and exit to tiles.
+  const modalDiscard = useCallback(async () => {
+    const pending = pendingActionRef.current
+    const exit = modalExitRef.current
+    pendingActionRef.current = null
+    modalExitRef.current = false
+    setShowTextModal(false)
+    if (pending) {
+      try { await pending() } catch { /* the action's own error path */ }
+      await regenerateText()
+    } else {
+      // Toggle-off case: discard the text's changes (the comic wins).
+      clearDraftFn()
+      setTextDirty(false)
+      setTextValue('')
+      mediaNumberRef.current = new Map()
+    }
+    if (exit) {
+      setTextMode(false)
+      if (selectedId !== null) storeRememberedTextMode(selectedId, false)
+    }
+  }, [regenerateText, clearDraftFn, selectedId])
+
+  // --- B18 round 5 — the UNIFIED preview-edit guard ------------------------
+  // guardPreviewEdit — the single entry point for a PREVIEW edit (a caption
+  // commit, a reorder, a delete, an upload, a caption-page insert):
+  //   text mode + dirty text  → the Update / Discard MODAL (the edit is parked)
+  //   text mode + clean text  → run the edit + regenerate the markdown
+  //                             (a regeneration event — numbers refresh)
+  //   tiles + shared draft    → the cross-browser GUARD (Review → text mode;
+  //                             Discard → clear the draft + run the edit)
+  //   otherwise               → run the edit
+  // `actionThunk` is a no-arg closure created at the call site (after the
+  // underlying action is declared), so it can capture the action directly.
+  const guardPreviewEdit = useCallback(async (actionThunk) => {
+    if (textMode) {
+      if (textDirty) { beginTextModal(actionThunk); return }
+      await actionThunk()
+      await regenerateText()
+      return
+    }
+    // tiles: the cross-browser guard (a shared draft exists).
+    guardOrPerform(actionThunk)
+  }, [textMode, textDirty, beginTextModal, guardOrPerform, regenerateText])
 
   // B18 round 5 — RESTORE-ON-LOAD: if THIS browser remembers the comic was in
   // text mode (the owner was working there), auto-return to text mode once the
@@ -1604,12 +1667,12 @@ export default function ComicEditor({
         setError('No image on the clipboard — copy an image first, then Ctrl+V in the editor, or drag one in / double-click to pick files.')
         return
       }
-      await addFiles(files)
+      guardPreviewEdit(async () => { await addFiles(files) })
     } catch (err) {
       setNotice(null)
       setError('Couldn’t read the clipboard (permission denied or empty) — drag the images in, or double-click the dropzone to pick files.')
     }
-  }, [selectedId, addFiles])
+  }, [selectedId, addFiles, guardPreviewEdit])
 
   // Paste (Ctrl+V / right-click → Paste) — the RELIABLE clipboard path.
   //
@@ -1705,8 +1768,8 @@ export default function ComicEditor({
   const onFilePicked = useCallback((e) => {
     const files = Array.from(e.target.files || [])
     e.target.value = '' // let the same file be re-picked later
-    if (files.length) addFiles(files)
-  }, [addFiles])
+    if (files.length) guardPreviewEdit(async () => { await addFiles(files) })
+  }, [addFiles, guardPreviewEdit])
 
   // --- Step 3: drag-reorder ----------------------------------------------------
   //
@@ -2128,27 +2191,12 @@ export default function ComicEditor({
     }
   }, [selectedId, selectedPages, pages, csrfToken])
 
-  // B18 round 5 — expose `reorder` to the early modal helper (TDZ guard).
-  useEffect(() => { reorderRef.current = reorder }, [reorder])
-
-  // B18 round 5 — REORDER WITH the text-mode guard / modal. A preview reorder
-  // is a tiles action that conflicts with un-updated text, so:
-  //   text mode + dirty text  → the Update / Discard MODAL (the drag is parked)
-  //   text mode + clean text  → apply the drag + regenerate the markdown
-  //                             (a regeneration event — numbers refresh)
-  //   tiles + shared draft    → the GUARD prompt (Review → text mode;
-  //                             Discard → clear the draft + apply the drag)
-  //   otherwise               → the plain reorder
+  // B18 round 5 — REORDER WITH the unified preview-edit guard. A reorder is
+  // one of the preview edits routed through guardPreviewEdit (the modal /
+  // regenerate / cross-browser logic lives there).
   const reorderWithGuard = useCallback(async (next) => {
-    if (textMode) {
-      if (textDirty) { beginTextModal(next); return }
-      await reorder(next)
-      await regenerateText()
-      return
-    }
-    // tiles: guardOrPerform prompts when a shared draft exists, else performs.
-    guardOrPerform(() => reorder(next))
-  }, [textMode, textDirty, beginTextModal, guardOrPerform, reorder, regenerateText])
+    guardPreviewEdit(() => reorder(next))
+  }, [guardPreviewEdit, reorder])
 
   // Step 13 — the SECTION is the file-drop catch-all: a file dropped anywhere
   // in it appends at the end (Step 14: at the resolved slot). Defined AFTER
@@ -2175,21 +2223,23 @@ export default function ComicEditor({
         insertIndex = selectedPages.length   // after the last visible figure → end
       }
     }
-    // Upload first (appends at the end — the round-1 pipeline, unchanged).
-    const newPages = await addFiles(files)
-    if (newPages.length === 0) return
-    // If there is no specific index, the end-append above is the final result.
-    if (insertIndex === null) return
-    // Splice the new pages at insertIndex and persist the new order.
-    // `selectedPages` here is the STALE closure value (length N, before
-    // addFiles) — exactly the list the slot was resolved against.
-    const newOrder = [
-      ...selectedPages.slice(0, insertIndex),
-      ...newPages,
-      ...selectedPages.slice(insertIndex),
-    ]
-    reorder(newOrder)
-  }, [gridDropSlot, previewDropIdx, selectedPages, visiblePagesRef, addFiles, reorder])
+    // The upload + reorder is ONE composite (the owner's preview edit): guard
+    // it as a single thunk (either it stands (Discard) or it's dropped
+    // (Update) or the text is regenerated around it (clean)).
+    guardPreviewEdit(async () => {
+      const newPages = await addFiles(files)
+      if (newPages.length === 0) return
+      if (insertIndex === null) return
+      // `selectedPages` here is the STALE closure value (length N, before
+      // addFiles) — exactly the list the slot was resolved against.
+      const newOrder = [
+        ...selectedPages.slice(0, insertIndex),
+        ...newPages,
+        ...selectedPages.slice(insertIndex),
+      ]
+      reorder(newOrder)
+    })
+  }, [gridDropSlot, previewDropIdx, selectedPages, visiblePagesRef, addFiles, reorder, guardPreviewEdit])
 
   // Step 11.5c — the drop resolves the gap with the SAME resolver the marker
   // uses (gapFromEvent), so it lands exactly where the indicator showed. The
@@ -2413,9 +2463,9 @@ export default function ComicEditor({
     if (timers[key]) { clearTimeout(timers[key]); delete timers[key] }
     timers[key] = setTimeout(() => {
       delete timers[key]
-      saveCaption(page.id, slot, value)
+      guardPreviewEdit(() => saveCaption(page.id, slot, value))
     }, 600)
-  }, [saveCaption, captionSave])
+  }, [saveCaption, captionSave, guardPreviewEdit])
 
   // B18 round 3, pts 3/4/12 — flush ONE page's pending debounce timer (the
   // house pattern from round 2 substep 9, generalized): a programmatic
@@ -2442,8 +2492,8 @@ export default function ComicEditor({
     const timers = captionTimers.current
     if (timers[key]) { clearTimeout(timers[key]); delete timers[key] }
     setCaptionEditId(null)
-    saveCaption(page.id, slot, page[slotOf(slot)] ?? '')
-  }, [saveCaption])
+    guardPreviewEdit(() => saveCaption(page.id, slot, page[slotOf(slot)] ?? ''))
+  }, [saveCaption, guardPreviewEdit])
 
   // B18 round 3, pt 12 — the caption keydown contract, shared by the caption
   // page's textarea and the regular caption's (now multi-line) input:
@@ -2512,8 +2562,18 @@ export default function ComicEditor({
     const page = selectedPages.find(p => p.id === pageId)
     if (!page) return false
     if (!opts.skipConfirm) {
-      const ok = window.confirm(`Delete page ${page.page_number} (${fileNameOf(page.file_path)})?\nThe remaining pages renumber — you can undo with Ctrl+Z.`)
-      if (!ok) return false
+      // B18 round 6, issue 8 — a STYLED confirm (the reusable modal) instead of
+      // the native window.confirm: the destructive "Delete" is the red action,
+      // "Cancel" is neutral. It re-enters deletePage with skipConfirm so the
+      // actual delete runs exactly once.
+      setConfirmReq({
+        title: `Delete page ${page.page_number}?`,
+        message: `Delete page ${page.page_number} (${fileNameOf(page.file_path)}). The remaining pages renumber — you can undo with Ctrl+Z.`,
+        confirmLabel: 'Delete',
+        tone: 'danger',
+        onConfirm: () => { deletePage(pageId, { skipConfirm: true }) },
+      })
+      return
     }
     // round 7b — the delete is ONE action (suppressed inside a composite,
     // which owns the entry).
@@ -2596,13 +2656,21 @@ export default function ComicEditor({
   // clears the text optimistically, then PATCHes null (an explicit null
   // CLEARS the server value). B18 round 4 — per SLOT: the bin deletes its
   // own slot's caption only (the sibling slot — if filled — stays).
-  const deleteCaption = useCallback(async (pageId, slot) => {
+  const deleteCaption = useCallback(async (pageId, slot, opts = {}) => {
     const page = selectedPages.find(x => x.id === pageId)
     if (!page) return false
-    const ok = window.confirm(
-      `Delete the caption on page ${page.page_number}?\nYou can undo with Ctrl+Z.`,
-    )
-    if (!ok) return false
+    // B18 round 6, issue 8 — a STYLED confirm (the reusable modal) instead of
+    // the native window.confirm; re-enters with skipConfirm to proceed.
+    if (!opts.skipConfirm) {
+      setConfirmReq({
+        title: 'Delete caption?',
+        message: `Delete the caption on page ${page.page_number}? You can undo with Ctrl+Z.`,
+        confirmLabel: 'Delete',
+        tone: 'danger',
+        onConfirm: () => { deleteCaption(pageId, slot, { skipConfirm: true }) },
+      })
+      return
+    }
     const field = slotOf(slot)
     const key = `${pageId}:${slot}`
     // round 7b — register the burst's entry BEFORE the local state moves
@@ -3149,15 +3217,30 @@ export default function ComicEditor({
       setPages(prev => prev.map(p2 => (p2.id === target.id ? { ...p2, caption: merged } : p2)))
     }
     // The source page is deleted (the house confirm still applies — page
-    // deletes always ask). If the owner cancels it, the merge stands (the
-    // destination has the text) and the source stays too — say so, so the
+    // deletes always ask). B18 round 6, issue 8 — the async STYLED confirm:
+    // the composite (save + delete) is ONE action, settled when the owner
+    // resolves the modal (the modal only closes via its two buttons). Confirm
+    // → the delete runs (the server renumbers 1..N); Cancel → the merge stands
+    // (the destination has the text) and the source stays too — say so, so the
     // duplicate is understood, not "stuck".
     if (captionEditId === `${pageId}:page`) setCaptionEditId(null)
-    const deleted = await deletePage(pageId)       // the server renumbers 1..N
-    if (!deleted && changed) {
-      setError(`The caption was merged into page ${target.page_number} — the caption page was kept (its delete was cancelled). Delete it from its bin if you want it gone.`)
-    }
-    endComposite()
+    const srcNumber = mine[idx].page_number
+    setConfirmReq({
+      title: `Delete page ${srcNumber}?`,
+      message: `The caption was merged into page ${target.page_number}. Delete the source page ${srcNumber}? You can undo with Ctrl+Z.`,
+      confirmLabel: 'Delete',
+      tone: 'danger',
+      onConfirm: async () => {
+        await deletePage(pageId, { skipConfirm: true })   // the server renumbers 1..N
+        endComposite()
+      },
+      onCancel: () => {
+        if (changed) {
+          setError(`The caption was merged into page ${target.page_number} — the caption page was kept (its delete was cancelled). Delete it from its bin if you want it gone.`)
+        }
+        endComposite()
+      },
+    })
   }, [selectedPages, nearestCaptionPage, flushCaptionTimer, saveCaption, deletePage, setError, setPages, captionEditId, setCaptionEditId])
 
   // B2.5 Step 15 (folded into B18), reworked in B18 round 2 substep 7: the
@@ -3321,7 +3404,7 @@ export default function ComicEditor({
   // active page reconcile through the validity effect above (success: the
   // deleted ids prune themselves out of the selection; failure: the pages are
   // back, so the selection stays valid and the batch can be retried).
-  const deletePages = useCallback(async (ids) => {
+  const deletePages = useCallback(async (ids, opts = {}) => {
     if (deleting) return
     if (!Array.isArray(ids) || ids.length === 0) return
     // Resolve to the current comic's pages (reading order); ignore ids that
@@ -3329,11 +3412,18 @@ export default function ComicEditor({
     const targets = selectedPages.filter(p => ids.includes(p.id))
     if (targets.length === 0) return
     const numbers = targets.map(p => p.page_number)
-    const ok = window.confirm(
-      `Delete ${targets.length} page${targets.length === 1 ? '' : 's'} (pages ${numbers.join(', ')})?`
-      + '\nThe remaining pages renumber — you can undo with Ctrl+Z.',
-    )
-    if (!ok) return
+    // B18 round 6, issue 8 — a STYLED confirm (the reusable modal) instead of
+    // the native window.confirm; re-enters with skipConfirm to proceed.
+    if (!opts.skipConfirm) {
+      setConfirmReq({
+        title: `Delete ${targets.length} page${targets.length === 1 ? '' : 's'}?`,
+        message: `Delete ${targets.length} page${targets.length === 1 ? '' : 's'} (pages ${numbers.join(', ')}). The remaining pages renumber — you can undo with Ctrl+Z.`,
+        confirmLabel: 'Delete',
+        tone: 'danger',
+        onConfirm: () => { deletePages(ids, { skipConfirm: true }) },
+      })
+      return
+    }
     // round 7b — the whole batch is ONE action (a partial batch keeps its
     // entry: the pages that landed are a real, undoable state).
     const hist = beginAction()
@@ -3389,8 +3479,8 @@ export default function ComicEditor({
   const deleteSelection = useCallback(() => {
     const ids = selectedIds.length ? selectedIds : (activePageId != null ? [activePageId] : [])
     if (ids.length === 0) return
-    deletePages(ids)
-  }, [selectedIds, activePageId, deletePages])
+    guardPreviewEdit(() => deletePages(ids))
+  }, [selectedIds, activePageId, deletePages, guardPreviewEdit])
 
   // Step 12.5a + 12.5b — keyboard delete + Esc. The Delete key deletes the
   // SELECTION (falling back to the active page — 1 page) instead of the
@@ -3583,21 +3673,26 @@ export default function ComicEditor({
         {/* LEFT — the editor pane: comic select + create form + dropzone + page list. */}
         <div className="comic-left">
           <label htmlFor="comic-select">Comic</label>
+          {/* B18 round 6, issue 7 — the unsaved comic is RED the moment it
+              shows, not only on hover. Native <select> dropdowns largely
+              ignore option CSS, so the signal is layered three ways: (a) the
+              CLOSED control (always visible) turns red when the SELECTED comic
+              has unsaved edits; (b) an inline colour on the <option> (works in
+              Chromium's list); (c) the leading "● " marker, which survives
+              OS-drawn dropdowns that ignore both. */}
           <select
             id="comic-select"
+            className={selectedComic && selectedComic.unsavedTextMode ? 'comic-select comic-select--unsaved' : 'comic-select'}
             value={selectedId ?? ''}
             onChange={e => setSelectedId(e.target.value ? Number(e.target.value) : null)}
           >
             {comics.length === 0 && <option value="">(no comics yet — create one below)</option>}
             {comics.map(c => (
-              // B18 round 5 — a comic with UNSAVED text-mode edits (the shared
-              // draft exists on the server) is listed in RED so the owner sees
-              // it in the comic list, in any browser. A leading marker makes the
-              // signal survive OS-drawn dropdowns that ignore option colour.
               <option
                 key={c.id}
                 value={c.id}
                 className={c.unsavedTextMode ? 'comic-option comic-option--unsaved' : 'comic-option'}
+                style={c.unsavedTextMode ? { color: 'var(--accent)', fontWeight: 700 } : undefined}
               >
                 {c.unsavedTextMode ? '● ' : ''}{c.title}
               </option>
@@ -3764,103 +3859,94 @@ export default function ComicEditor({
               grid (tile size = `--tile`, set inline), fully in = one tile
               filling the section width. */}
           <div className="pages-section" ref={pagesSectionRef}>
-            {/* B18 round 5 — the Tiles ↔ Text mode toggle + the unsaved-text-mode
-                badge. The toggle is RED when the shared draft exists (unsaved
-                text-mode edits); its hover explains the Review/Discard choice.
-                In TEXT mode the pane below is the comic as editable markdown
-                (prose-first); in TILES mode it is the existing grid (below). */}
-            <div className="mode-bar">
-              <button
-                type="button"
-                className={
-                  'mode-toggle'
-                  + (textMode ? ' mode-toggle--text' : '')
-                  + (hasDraftForSelected ? ' mode-toggle--unsaved' : '')
-                }
-                title={hasDraftForSelected && !textMode
-                  ? 'There are unsaved text mode changes. Return to text mode to review them, or keep editing in tiles (your next tile change will ask you to review or discard them).'
-                  : (textMode ? 'Switch back to the tile view (applies your text first).' : 'Edit this comic as text.')}
-                onClick={handleModeToggle}
-              >
-                {textMode ? 'Text' : 'Tiles'}
-              </button>
-              {hasDraftForSelected && !textMode ? (
-                <span className="unsaved-badge" title="This comic has unsaved text-mode edits (shared across browsers).">Unsaved text mode edits.</span>
-              ) : null}
+            {/* B18 round 6 — the UNIFIED heading row (BOTH modes). Replaces the
+                old mode-bar + text-pane-toolbar + pages-heading (issues 1/4/5):
+                LEFT   — the "Text Mode" toggle, pill-styled like "active page
+                         only" (always says "Text Mode"; greyed off / highlighted
+                         on) + the unsaved badge (ONE consistent spot, issue 4).
+                CENTRE — "Media — Comic Name" (tiles) / "Text — Comic Name"
+                         (text), centred over the surface (issue 5).
+                RIGHT  — the text-mode controls (Update · Auto · Copy), in-line
+                         with the heading (issue 5); hidden in tiles mode.
+                Delete moved to the PREVIEW heading (issue 6a). */}
+            <div className="editor-heading">
+              <div className="heading-left">
+                <button
+                  type="button"
+                  className={
+                    'preview-toggle mode-toggle'
+                    + (textMode ? ' preview-toggle--on' : '')
+                    + (textDirty || hasDraftForSelected ? ' mode-toggle--unsaved' : '')
+                  }
+                  aria-pressed={textMode}
+                  title={textDirty || hasDraftForSelected
+                    ? 'Unsaved text mode edits. Update applies them (the text wins); Discard keeps the comic (the edits are lost).'
+                    : (textMode ? 'Switch back to the tile view.' : 'Edit this comic as text.')}
+                  onClick={handleModeToggle}
+                >
+                  Text Mode
+                </button>
+                {(textDirty || hasDraftForSelected) ? (
+                  <span className="unsaved-badge" title="This comic has unsaved text-mode edits (shared across browsers).">Unsaved text mode edits.</span>
+                ) : null}
+              </div>
+              <h3 className="heading-title">
+                {(textMode ? 'Text' : 'Media') + ' — ' + (selectedComic ? selectedComic.title : 'Untitled')}
+                {reordering ? <span className="muted" style={{ fontWeight: 400 }}> — reordering…</span> : null}
+              </h3>
+              <div className="heading-right">
+                {textMode ? (
+                  <>
+                    <button
+                      type="button"
+                      className="text-btn text-btn--primary"
+                      disabled={textUpdating || !textDirty}
+                      title="Apply the text to the comic (reorder the media, set the captions, create/delete caption pages)."
+                      onClick={() => applyTextMode()}
+                    >
+                      {textUpdating ? 'Updating…' : 'Update'}
+                    </button>
+                    <label className="auto-update" title="When ON, moving a marker in the text immediately reorders the preview (live).">
+                      <input
+                        type="checkbox"
+                        checked={autoUpdate}
+                        onChange={e => setAutoUpdate(e.target.checked)}
+                      />
+                      Auto
+                    </label>
+                    <button
+                      type="button"
+                      className="text-btn"
+                      title="Copy the text WITHOUT the punctuation markup (the plain prose + captions, in order)."
+                      onClick={copyText}
+                    >
+                      {copyCue || 'Copy'}
+                    </button>
+                  </>
+                ) : null}
+              </div>
             </div>
 
             {textMode ? (
-              /* B18 round 5 — the TEXT PANE: the comic as editable markdown.
-                 Toolbar: Update (apply the text to the comic), the auto-update
-                 toggle (OFF by default), and Copy (plain text, no markup).
-                 The textarea holds the text; markers [media N] are the
-                 numbered media, ">" lines are captions, "---" fences are
-                 caption pages, and everything else is prose. */
-              <>
-                <div className="text-pane-toolbar">
-                  <button
-                    type="button"
-                    className="text-btn text-btn--primary"
-                    disabled={textUpdating || !textDirty}
-                    title="Apply the text to the comic (reorder the media, set the captions, create/delete caption pages)."
-                    onClick={() => applyTextMode()}
-                  >
-                    {textUpdating ? 'Updating…' : 'Update'}
-                  </button>
-                  <label className="auto-update" title="When ON, moving a marker in the text immediately reorders the preview (live).">
-                    <input
-                      type="checkbox"
-                      checked={autoUpdate}
-                      onChange={e => setAutoUpdate(e.target.checked)}
-                    />
-                    Auto
-                  </label>
-                  <button
-                    type="button"
-                    className="text-btn"
-                    title="Copy the text WITHOUT the punctuation markup (the plain prose + captions, in order)."
-                    onClick={copyText}
-                  >
-                    {copyCue || 'Copy'}
-                  </button>
-                  {textDirty ? <span className="text-dirty">Unsaved text mode edits.</span> : null}
-                </div>
-                <textarea
-                  ref={textPaneRef}
-                  className="text-pane"
-                  value={textValue}
-                  onChange={e => handleTextChange(e.target.value)}
-                  spellCheck={false}
-                  placeholder={'Describe the comic…\n\n[media 1]\n> A caption above or below the image.\n\n---\nA caption-only page.\n---'}
-                />
-              </>
+              /* B18 round 6 — the TEXT PANE: the comic as editable markdown.
+                 The Update · Auto · Copy toolbar now lives in the heading row
+                 above. Markers [media N] are the numbered media, ">" lines are
+                 captions, "---" fences are caption pages, and everything else
+                 is prose. */
+              <textarea
+                ref={textPaneRef}
+                className="text-pane"
+                value={textValue}
+                onChange={e => handleTextChange(e.target.value)}
+                spellCheck={false}
+                placeholder={'Describe the comic…\n\n[media 1]\n> A caption above or below the image.\n\n---\nA caption-only page.\n---'}
+              />
             ) : (
               <>
-            {/* Step 12.5a — the heading row is flex; the always-visible
-                "Delete" pill sits right-aligned (the h3 spans the section
-                width, so its right edge IS the tiles' right margin) and
-                deletes the ACTIVE page. The Delete key does the same. */}
-            <h3 className="pages-heading">
-              Pages
-              {selectedComic ? <span> — {selectedComic.title}</span> : null}
-              <span className="muted" style={{ fontWeight: 400 }}> ({selectedPages.length})</span>
-              {reordering ? <span className="muted" style={{ fontWeight: 400 }}> — reordering…</span> : null}
-              {/* Step 12.5b — deletes the WHOLE selection (the active page
-                  alone when there is none); the label carries the count. */}
-              <button
-                type="button"
-                className="pages-delete-btn"
-                title={deleteCount > 1
-                  ? `Delete the ${deleteCount} selected pages (the Delete key does the same)`
-                  : 'Delete the active page (the Delete key does the same)'}
-                disabled={selectedPages.length === 0 || deleting}
-                onClick={() => deleteSelection()}
-              >
-                <PageBinIcon />
-                {deleteCount > 1 ? `Delete ${deleteCount}` : 'Delete'}
-              </button>
-            </h3>
-
+            {/* B18 round 6 — the heading moved to the shared editor-heading
+                above (both modes), and the Delete pill moved to the PREVIEW
+                heading (issue 6a). The grid (or the fake first-tile caption
+                page) renders directly under the heading row. */}
             {selectedPages.length === 0 ? (
               /* B18 round 3, pt 15 — the FAKE caption page in the position
                  of the FIRST TILE (a real grid cell, so it sits exactly
@@ -3876,7 +3962,7 @@ export default function ComicEditor({
                   {/* B18 round 4, pt 7 — opening a caption page lands it
                       IMMEDIATELY in the typable state: create it, then arm
                       its 'page' editor (the armed textarea already autofocuses). */}
-                  <FakeCaptionPage onAdd={async () => { const created = await insertCaptionPageAt(0); if (created) setCaptionEditId(`${created.id}:page`) }} />
+                  <FakeCaptionPage onAdd={async () => { guardPreviewEdit(async () => { const created = await insertCaptionPageAt(0); if (created) setCaptionEditId(`${created.id}:page`) }) }} />
                 </li>
               </ul>
             ) : (
@@ -4067,6 +4153,23 @@ export default function ComicEditor({
                 Caption saved
               </span>
             ) : null}
+            {/* B18 round 6, issue 6a — the Delete pill, moved from the old
+                pages heading to the PREVIEW heading's top-right, on the SAME
+                line as "active page only". Visible in BOTH modes; deletes the
+                whole selection (the active page alone when there is none).
+                The Delete key does the same. */}
+            <button
+              type="button"
+              className="pages-delete-btn preview-delete-btn"
+              title={deleteCount > 1
+                ? `Delete the ${deleteCount} selected pages (the Delete key does the same)`
+                : 'Delete the active page (the Delete key does the same)'}
+              disabled={selectedPages.length === 0 || deleting}
+              onClick={() => deleteSelection()}
+            >
+              <PageBinIcon />
+              {deleteCount > 1 ? `Delete ${deleteCount}` : 'Delete'}
+            </button>
           </h3>
           {selectedPages.length === 0 ? (
             /* B18 round 3, pt 15 — the FAKE caption page ON THE PREVIEW
@@ -4088,7 +4191,7 @@ export default function ComicEditor({
                   arm its 'page' editor (the armed textarea autofocuses).
                   B18 round 6b — while picking, the capture-phase handler
                   intercepts this click (a pick must never create a page). */}
-              <FakeCaptionPage onAdd={async () => { const created = await insertCaptionPageAt(0); if (created) setCaptionEditId(`${created.id}:page`) }} />
+              <FakeCaptionPage onAdd={async () => { guardPreviewEdit(async () => { const created = await insertCaptionPageAt(0); if (created) setCaptionEditId(`${created.id}:page`) }) }} />
             </div>
           ) : (
             <div
@@ -4484,16 +4587,18 @@ export default function ComicEditor({
 
       {/* B18 round 5 — the UPDATE / DISCARD modal: a preview reorder that
           conflicts with un-updated text (while in text mode). Update = the
-          markdown wins (the drag is dropped); Discard = the drag applies + the
-          markdown regenerates (numbers refresh). */}
+          markdown wins (the pending edit is dropped); Discard = the comic's
+          state stands (the pending edit runs + the markdown regenerates).
+          Also used for toggle-off with unsaved changes (no pending edit —
+          Update applies + exits; Discard discards + exits). */}
       {showTextModal && (
         <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Unsaved text mode edits">
           <div className="modal-card">
             <h3>Unsaved text mode edits</h3>
             <p className="modal-text">
-              You moved a page, but the text still has unsaved edits.
-              Update from the text (the move is dropped), or Discard the text
-              edits and keep the move?
+              There are unsaved text mode edits.
+              Update = apply the text to the comic (the text wins).
+              Discard = keep the comic's state (the text's changes are discarded).
             </p>
             <div className="modal-actions">
               <button className="btn--primary" onClick={modalUpdate}>Update</button>
@@ -4517,6 +4622,34 @@ export default function ComicEditor({
             <div className="modal-actions">
               <button className="btn--primary" onClick={guardReview}>Review in text mode</button>
               <button className="btn--danger" onClick={guardDiscard}>Discard</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* B18 round 6, issue 8 — the REUSABLE styled confirm modal (the house
+          replacement for the native window.confirm in this editor). Rendered
+          from the single `confirmReq` state; the destructive action is the red
+          `.btn--danger` (or accent `.btn--primary` for non-destructive tones)
+          and "Cancel" is the neutral `.btn--neutral`. */}
+      {confirmReq && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={confirmReq.title}>
+          <div className="modal-card">
+            <h3>{confirmReq.title}</h3>
+            <p className="modal-text">{confirmReq.message}</p>
+            <div className="modal-actions">
+              <button
+                className={confirmReq.tone === 'danger' ? 'btn--danger' : 'btn--primary'}
+                onClick={() => { const f = confirmReq.onConfirm; setConfirmReq(null); if (f) f() }}
+              >
+                {confirmReq.confirmLabel || 'Confirm'}
+              </button>
+              <button
+                className="btn--neutral"
+                onClick={() => { const f = confirmReq.onCancel; setConfirmReq(null); if (f) f() }}
+              >
+                {confirmReq.cancelLabel || 'Cancel'}
+              </button>
             </div>
           </div>
         </div>
