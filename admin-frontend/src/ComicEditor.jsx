@@ -3886,7 +3886,7 @@ export default function ComicEditor({
                   key={c.id}
                   value={c.id}
                   className={unsaved ? 'comic-option comic-option--unsaved' : 'comic-option'}
-                  style={unsaved ? { color: 'var(--accent)', fontWeight: 700 } : undefined}
+                  style={unsaved ? { color: 'var(--accent)', fontWeight: 700 } : { color: 'var(--ink)', fontWeight: 400 }}
                 >
                   {unsaved ? '● ' : ''}{c.title}
                 </option>

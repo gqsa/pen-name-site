@@ -225,9 +225,16 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    only on hover. The closed <select> control (always visible) turns red when
    the SELECTED comic has unsaved edits; the option itself also carries an
    inline red (Chromium's list honours it) plus the leading "● " marker, which
-   survives OS-drawn dropdowns that ignore both. */
+   survives OS-drawn dropdowns that ignore both.
+   B18 round 5d — the options must carry EXPLICIT colour + weight: an <option>
+   inherits `color`/`font-weight` from its <select>, so while the closed
+   control is red (the selected comic is unsaved), EVERY entry in the opened
+   list inherited red too. The per-option explicit values below break that
+   inheritance — only genuinely-unsaved comics (per-comic flag, or the
+   selected comic's live textDirty) render red, in any state. */
 .comic-select { border-radius: 6px; }
 .comic-select--unsaved { border-color: var(--accent); color: var(--accent); font-weight: 700; box-shadow: 0 0 0 1px var(--accent-soft); }
+.comic-option { color: var(--ink); font-weight: 400; }
 .comic-option--unsaved { color: var(--accent); font-weight: 700; }
 /* B18 round 5 — the Update/Discard + Review/Discard prompt overlays. */
 .modal-overlay { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, .62); padding: 16px; }
