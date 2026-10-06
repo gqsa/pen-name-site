@@ -1150,11 +1150,24 @@ export default function ComicEditor({
   const saveDraft = useCallback(async (text) => {
     if (selectedId === null) return
     try {
-      await fetch(`/api/admin/comics/${selectedId}/text-draft`, {
+      const res = await fetch(`/api/admin/comics/${selectedId}/text-draft`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
         body: JSON.stringify({ draft: draftEncode(text, mediaNumberRef.current) }),
       })
+      // B18 round 5d — the moment the draft lands server-side, flip the LOCAL
+      // `unsavedTextMode` flag for THIS comic (the exact mirror of
+      // clearUnsavedFlag, which resets it on apply / discard). Before this the
+      // flag only reached `comics` via a full content refetch, so a comic you
+      // had just edited stayed UN-RED in this browser's dropdown until a page
+      // refresh — the owner's "the colour of their name in the drop down didn't
+      // change". Only ever SET it here (never clear it) — the apply/discard
+      // paths own the reset, and an autoUpdate apply that follows this PUT
+      // clears it right after.
+      if (res.ok) {
+        setComics(cs => (cs || []).map(c => (c.id === selectedId && !c.unsavedTextMode
+          ? { ...c, unsavedTextMode: true } : c)))
+      }
     } catch { /* best-effort — the textarea already holds the text */ }
   }, [selectedId, csrfToken])
 
@@ -3783,6 +3796,17 @@ export default function ComicEditor({
   // (the draft is server-side, not this session's local textDirty).
   const hasDraftForSelected = !!(selectedComic && selectedComic.unsavedTextMode)
 
+  // B18 round 5d — the per-comic "unsaved text mode edits" predicate for the
+  // DROPDOWN (the red name + the leading "● "). A comic is unsaved when it has
+  // a SERVER draft (the cross-browser `unsavedTextMode` flag — true in any
+  // browser: set locally by saveDraft, or read from the content GET) OR, for
+  // the SELECTED comic only, LOCAL un-updated edits (`textDirty` — true the
+  // moment the owner types, before the debounced saveDraft lands the draft).
+  // Including `textDirty` for the selected comic makes its name red IMMEDIATELY
+  // in a single browser as you switch between comics — "so you know which one
+  // needs to be checked" — not only after the 600ms save or a page refresh.
+  const isComicUnsaved = c => c.unsavedTextMode || (c.id === selectedId && textDirty)
+
   // Step 10 — derive the zoom regime + the grid tile size for THIS render:
   // low = a file-name list, mid = the grid (tile = `--tile` px), high = one
   // full-width tile. `tilePx` is linear across the grid regime (20..80 →
@@ -3850,21 +3874,24 @@ export default function ComicEditor({
               OS-drawn dropdowns that ignore both. */}
           <select
             id="comic-select"
-            className={selectedComic && selectedComic.unsavedTextMode ? 'comic-select comic-select--unsaved' : 'comic-select'}
+            className={selectedComic && isComicUnsaved(selectedComic) ? 'comic-select comic-select--unsaved' : 'comic-select'}
             value={selectedId ?? ''}
             onChange={e => setSelectedId(e.target.value ? Number(e.target.value) : null)}
           >
             {comics.length === 0 && <option value="">(no comics yet — create one below)</option>}
-            {comics.map(c => (
-              <option
-                key={c.id}
-                value={c.id}
-                className={c.unsavedTextMode ? 'comic-option comic-option--unsaved' : 'comic-option'}
-                style={c.unsavedTextMode ? { color: 'var(--accent)', fontWeight: 700 } : undefined}
-              >
-                {c.unsavedTextMode ? '● ' : ''}{c.title}
-              </option>
-            ))}
+            {comics.map(c => {
+              const unsaved = isComicUnsaved(c)
+              return (
+                <option
+                  key={c.id}
+                  value={c.id}
+                  className={unsaved ? 'comic-option comic-option--unsaved' : 'comic-option'}
+                  style={unsaved ? { color: 'var(--accent)', fontWeight: 700 } : undefined}
+                >
+                  {unsaved ? '● ' : ''}{c.title}
+                </option>
+              )
+            })}
           </select>
 
           {/* B2.5 Step 15 (folded into B18) — the per-comic theme colour. It
