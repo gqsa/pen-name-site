@@ -464,6 +464,32 @@ function dragHasFiles(e) {
   return Array.from(types).some(t => String(t).toLowerCase() === 'files')
 }
 
+// B18 round 5c, issue 4 — the caret offset an armed caption / caption page
+// should land on, computed from the ARMING CLICK. The owner: "the carat should
+// be where on the text i clicked, not at the start. and if you didn't click on
+// any particular text, then the carat should land at the start or end… based
+// on whether i clicked on the left or right half."
+//   • clicked a character → that character's offset (via caretRangeFromPoint,
+//     validated against the caption's own text node so a sibling label never
+//     leaks an offset);
+//   • clicked padding / between characters → START (left half of the caption's
+//     box) or END (right half).
+function computeCaptionCaretOffset(e, text, refEl, containerClass) {
+  const target = String(text ?? '')
+  if (typeof document !== 'undefined' && typeof document.caretRangeFromPoint === 'function') {
+    const range = document.caretRangeFromPoint(e.clientX, e.clientY)
+    if (range && range.startContainer && range.startContainer.nodeType === 3 /* TEXT_NODE */) {
+      const parent = range.startContainer.parentElement
+      const isOwnText = !containerClass || (parent && parent.classList && parent.classList.contains(containerClass))
+      const offset = range.startOffset
+      if (isOwnText && offset >= 0 && offset <= target.length) return offset
+    }
+  }
+  const rect = (refEl && refEl.getBoundingClientRect) ? refEl.getBoundingClientRect() : null
+  if (rect && rect.width > 0) return (e.clientX - rect.left) < rect.width / 2 ? 0 : target.length
+  return 0
+}
+
 export default function ComicEditor({
   csrfToken,
 }) {
@@ -562,6 +588,24 @@ export default function ComicEditor({
   // top/bottom '+' on a captionless page) arms this page; blurring an empty
   // one disarms it and the bar disappears again.
   const [captionEditId, setCaptionEditId] = useState(null)
+
+  // B18 round 5c, issue 4 — the caret offset the armed caption/caption-page
+  // textarea should land on (captured from the arming CLICK — the character the
+  // owner clicked, or START/END by the click's left/right half when no specific
+  // character was hit). `armedCaptionRef` points at the single armed textarea
+  // (only one caption is ever armed); the effect below focuses it and sets the
+  // caret to `captionCaretRef.current` on mount.
+  const armedCaptionRef = useRef(null)
+  const captionCaretRef = useRef(0)
+  const setArmedCaptionRef = useCallback((el) => { armedCaptionRef.current = el }, [])
+  useEffect(() => {
+    const el = armedCaptionRef.current
+    if (!el) return
+    el.focus()
+    const offset = Math.max(0, Math.min(captionCaretRef.current, (el.value || '').length))
+    el.setSelectionRange(offset, offset)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [captionEditId])
 
   // Step 7 — active page + the preview window.
   // activePageId is a PAGE id (a number). `selectedId` stays the COMIC — the
@@ -671,6 +715,12 @@ export default function ComicEditor({
   // The comic id we already auto-restored text mode for (prevents the restore
   // effect from re-firing on every render once it has entered text mode).
   const autoRestoredRef = useRef(null)
+  // B18 round 5c, issue 1 — refs so the comic-switch effect (below) reads the
+  // LATEST textMode + enterTextMode without a stale closure (the house ref
+  // pattern, cf. textValueRef / activePageIdRef / enterTextModeRef).
+  const textModeRef = useRef(textMode)
+  useEffect(() => { textModeRef.current = textMode }, [textMode])
+  const enterTextModeRef = useRef(null)
   // B18 round 5 — the FROZEN media number for a page (the reverse of
   // mediaNumberRef's number→pageId map), for the preview hover label in text
   // mode ("Media N"). null when the page has no frozen number (a caption page,
@@ -1130,7 +1180,17 @@ export default function ComicEditor({
     const prevScrollTop = pane ? pane.scrollTop : 0
     const prevSelStart = (pane && typeof pane.selectionStart === 'number') ? pane.selectionStart : null
     const prevSelEnd = (pane && typeof pane.selectionEnd === 'number') ? pane.selectionEnd : null
-    const { markdown, numberToPageId } = comicToMarkdown(selectedPages)
+    // B18 round 5c, issue 5 — read the pages from the REF (always the latest
+    // committed state), NOT the closure: `regenerateText` is a stable
+    // useCallback, and a caption edit re-renders `pages`/`selectedPages` one
+    // tick after the keystroke, so the closure `selectedPages` was a keystroke
+    // behind — the owner's "lags the typing by 1 letter, only adding the last
+    // letter typed when another letter is typed". The ref (synced by effect)
+    // always holds the fresh pages, so the regenerated markdown is complete.
+    const freshPages = (selectedPagesRef.current && selectedPagesRef.current.length)
+      ? selectedPagesRef.current
+      : (selectedPages || [])
+    const { markdown, numberToPageId } = comicToMarkdown(freshPages)
     mediaNumberRef.current = numberToPageId
     setTextValue(markdown)
     setTextDirty(false)
@@ -1165,18 +1225,29 @@ export default function ComicEditor({
       // regeneration event, not an update). Clear the dirty flag + the draft.
       setTextDirty(false)
       await clearDraftFn()
+      // B18 round 5c, issue 6 — reset the LOCAL unsaved flag on a SUCCESSFUL
+      // update (the server draft is cleared above, but this browser's `comics`
+      // cache still says "unsaved" → the pulsing toggle would stick until a
+      // refresh). Uses setComics directly (the clearUnsavedFlag helper is
+      // declared later in the body — a TDZ reference here would crash render).
+      setComics(cs => (cs || []).map(c => c.id === selectedId ? { ...c, unsavedTextMode: false } : c))
     } catch (err) {
       setError(err.message)
     } finally {
       setTextUpdating(false)
     }
-  }, [selectedId, textUpdating, comics, selectedPages, applyDoc, clearDraftFn, setError])
+  }, [selectedId, textUpdating, comics, selectedPages, applyDoc, clearDraftFn, setError, setComics])
 
   // enterTextMode — toggle ON: restore the shared draft (if any — the owner's
   // un-updated edits + frozen map) or regenerate from the comic's current order
   // (entering text mode is a regeneration event when there is no draft).
   const enterTextMode = useCallback(async () => {
     if (selectedId === null) return
+    // B18 round 5c, issue 1 — always reset the frozen map for THIS comic before
+    // adopting the draft's (or regenerating). Previously a draft WITHOUT a map
+    // left the PREVIOUS comic's frozen map in place — a stale-number leak once
+    // entering text mode happens per comic (the comic-switch effect below).
+    mediaNumberRef.current = new Map()
     const draft = await loadDraft(selectedId)
     if (draft && draft.text) {
       setTextValue(draft.text)
@@ -1188,6 +1259,9 @@ export default function ComicEditor({
     setTextMode(true)
     storeRememberedTextMode(selectedId, true)
   }, [selectedId, loadDraft, regenerateText])
+  // B18 round 5c, issue 1 — keep the ref current so the comic-switch effect
+  // (below) calls the LATEST enterTextMode (re-created when selectedId changes).
+  useEffect(() => { enterTextModeRef.current = enterTextMode }, [enterTextMode])
 
   // exitTextMode — toggle OFF: switching back to tiles. If there are
   // un-updated text changes, prompt the owner (Update = apply the text,
@@ -1263,6 +1337,17 @@ export default function ComicEditor({
     enterTextMode()
   }, [enterTextMode])
 
+  // B18 round 5c, issue 6 — clear the LOCAL `unsavedTextMode` flag for a comic.
+  // The server flag is authoritative, but this browser's `comics` state caches
+  // it; after an update / discard the local cache MUST be reset, otherwise
+  // `hasDraftForSelected` (and the pulsing toggle) stays true until a full page
+  // refresh — the owner's "the toggle is still pulsing… refreshing page clears
+  // this pulsing." Used by guardDiscard / modalUpdate / modalDiscard.
+  const clearUnsavedFlag = useCallback((comicId) => {
+    if (comicId === null) return
+    setComics(cs => (cs || []).map(c => c.id === comicId ? { ...c, unsavedTextMode: false } : c))
+  }, [])
+
   // guardDiscard — clear the shared draft (discard the unsaved text edits),
   // reset the local text state, then run the deferred tiles edit.
   const guardDiscard = useCallback(async () => {
@@ -1270,11 +1355,15 @@ export default function ComicEditor({
     guardActionRef.current = null
     setShowGuard(false)
     await clearDraftFn()
+    // B18 round 5c, issue 6 — reset the LOCAL unsaved flag too (the server
+    // draft is cleared above, but this browser's `comics` cache still says
+    // "unsaved" → the pulse would otherwise stick until a refresh).
+    clearUnsavedFlag(selectedId)
     setTextDirty(false)
     setTextValue('')
     mediaNumberRef.current = new Map()
     if (action) action()
-  }, [clearDraftFn])
+  }, [clearDraftFn, clearUnsavedFlag, selectedId])
 
   // --- B18 round 5 — the UPDATE / DISCARD modal (a preview EDIT that
   // conflicts with un-updated text, while in text mode) ---------------------
@@ -1285,6 +1374,43 @@ export default function ComicEditor({
     pendingActionRef.current = actionThunk
     setShowTextModal(true)
   }, [])
+
+  // B18 round 5c, issue 2 — CANCEL the Update/Discard modal: close it with
+  // NEITHER update NOR discard — the parked preview edit is dropped, and the
+  // owner stays in text mode (even if the modal was opened by a toggle-off).
+  // This is the owner's "there has to be an option to cancel… escape should
+  // close the modal with neither update nor discard occurring, i.e. you just
+  // return to the previous state before… trying to edit anything."
+  const cancelTextModal = useCallback(() => {
+    pendingActionRef.current = null
+    modalExitRef.current = false
+    setShowTextModal(false)
+  }, [])
+
+  // B18 round 5c, issue 2 — CANCEL the cross-browser guard (Review/Discard):
+  // close it with the deferred tiles edit DROPPED (neither reviewed nor
+  // discarded), staying in tiles. Same "return to the previous state" contract.
+  const cancelGuard = useCallback(() => {
+    guardActionRef.current = null
+    setShowGuard(false)
+  }, [])
+
+  // B18 round 5c, issue 2 — the Escape key closes a modal with NEITHER update
+  // NOR discard (the owner: "at least escape should close the modal with
+  // neither update nor discard occurring, i.e. you just return to the previous
+  // state"). Applies to both the Update/Discard modal and the Review/Discard
+  // guard. Registered only while a modal is open (no global Escape hijack).
+  useEffect(() => {
+    if (!showTextModal && !showGuard) return
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      if (showTextModal) cancelTextModal()
+      else if (showGuard) cancelGuard()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [showTextModal, showGuard, cancelTextModal, cancelGuard])
 
   // modalUpdate — UPDATE: the text's state is applied to the comic (an update
   // event); the pending preview edit is DROPPED (the text wins — applyDoc
@@ -1315,6 +1441,11 @@ export default function ComicEditor({
     setShowTextModal(false)
     if (pending) {
       try { await pending() } catch { /* the action's own error path */ }
+      // B18 round 5c, issue 6 — the DISCARD branch was missing the draft clear
+      // (the owner's stuck pulse): the pending edit ran and the markdown was
+      // regenerated, but the shared draft (the unsaved text) was left behind,
+      // so the comic still looked "unsaved" until a page refresh. Clear it.
+      await clearDraftFn()
       await regenerateText()
     } else {
       // Toggle-off case: discard the text's changes (the comic wins).
@@ -1323,11 +1454,14 @@ export default function ComicEditor({
       setTextValue('')
       mediaNumberRef.current = new Map()
     }
+    // B18 round 5c, issue 6 — reset the LOCAL unsaved flag (both branches), so
+    // the pulsing toggle clears without a refresh.
+    clearUnsavedFlag(selectedId)
     if (exit) {
       setTextMode(false)
       if (selectedId !== null) storeRememberedTextMode(selectedId, false)
     }
-  }, [regenerateText, clearDraftFn, selectedId])
+  }, [regenerateText, clearDraftFn, clearUnsavedFlag, selectedId])
 
   // --- B18 round 5 — the UNIFIED preview-edit guard ------------------------
   // guardPreviewEdit — the single entry point for a PREVIEW edit (a caption
@@ -1364,6 +1498,40 @@ export default function ComicEditor({
     autoRestoredRef.current = selectedId
     enterTextMode()
   }, [selectedId, comics, textMode, enterTextMode])
+
+  // B18 round 5c, issue 1 — a comic switch must NOT leak the PREVIOUS comic's
+  // local text session (the global `textDirty` flag + the text value + the
+  // frozen map) into the new one: that made EVERY comic show the "unsaved"
+  // pulse + the previous comic's markdown (the owner's "all comics are showing
+  // red now. it should only be the ones with unsaved text mode edits."). The
+  // `textDirty` / `textValue` / `mediaNumberRef` globals are keyed to whatever
+  // comic was last edited, so reset the session on every `selectedId` change:
+  //   • in text mode  → re-enter for the new comic (its draft or a fresh
+  //                      regeneration) and claim the auto-restore slot so the
+  //                      restore effect above does not double-enter;
+  //   • in tiles      → just clear the globals (the restore effect re-enters if
+  //                      the new comic remembers text mode).
+  // Reads textMode / enterTextMode via refs (they are re-created each render;
+  // the refs always hold the latest) so this effect stays correct on every
+  // switch regardless of React's effect-scheduling order.
+  useEffect(() => {
+    if (selectedId === null) return
+    // If the auto-restore effect (above) just claimed this comic (remembered
+    // text mode → enterTextMode in flight), do NOT clear its session — its async
+    // continuation is about to set textValue / textDirty / mediaNumberRef for
+    // THIS comic. Skipping avoids clobbering the restore.
+    if (autoRestoredRef.current === selectedId) return
+    if (autoUpdateTimer.current) { clearTimeout(autoUpdateTimer.current); autoUpdateTimer.current = null }
+    if (textModeRef.current) {
+      autoRestoredRef.current = selectedId
+      enterTextModeRef.current()
+    } else {
+      mediaNumberRef.current = new Map()
+      setTextDirty(false)
+      setTextValue('')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId])
 
   const performUndo = useCallback(() => {
     const run = async () => {
@@ -3870,6 +4038,13 @@ export default function ComicEditor({
                          with the heading (issue 5); hidden in tiles mode.
                 Delete moved to the PREVIEW heading (issue 6a). */}
             <div className="editor-heading">
+              {/* B18 round 5c, issue 3 — the comic NAME is on its own line,
+                  ABOVE the controls (it was crammed between them before). */}
+              <h3 className="heading-title">
+                {(textMode ? 'Text' : 'Media') + ' — ' + (selectedComic ? selectedComic.title : 'Untitled')}
+                {reordering ? <span className="muted" style={{ fontWeight: 400 }}> — reordering…</span> : null}
+              </h3>
+              <div className="heading-controls">
               <div className="heading-left">
                 <button
                   type="button"
@@ -3890,10 +4065,6 @@ export default function ComicEditor({
                   <span className="unsaved-badge" title="This comic has unsaved text-mode edits (shared across browsers).">Unsaved text mode edits.</span>
                 ) : null}
               </div>
-              <h3 className="heading-title">
-                {(textMode ? 'Text' : 'Media') + ' — ' + (selectedComic ? selectedComic.title : 'Untitled')}
-                {reordering ? <span className="muted" style={{ fontWeight: 400 }}> — reordering…</span> : null}
-              </h3>
               <div className="heading-right">
                 {textMode ? (
                   <>
@@ -3924,6 +4095,7 @@ export default function ComicEditor({
                     </button>
                   </>
                 ) : null}
+              </div>
               </div>
             </div>
 
@@ -4329,7 +4501,25 @@ export default function ComicEditor({
                           const host = e.currentTarget.closest('.caption-page-box, .cap-bar')
                           if (host && host.contains(related)) return
                         }
-                        if (captionSave !== 'error') setCaptionEditId(null)
+                        // B18 round 5c, issue 5 — commit on a genuine
+                        // click-away. Previously this only DISARMED (dropping
+                        // the editor) and left the pending 600 ms debounce
+                        // timer to fire (or be lost if the owner navigated
+                        // away) — the owner's "when i click off the caption, no
+                        // update is happening, the last inputted text is in the
+                        // preview window but not updated to the text box".
+                        // commitCaption flushes the timer and saves NOW, so the
+                        // caption lands (and a later text-mode regeneration
+                        // picks up the full text). Only commit THIS page's armed
+                        // slot (captionEditId is the single armed editor); fall
+                        // back to a plain disarm otherwise.
+                        if (captionSave === 'error') return
+                        if (captionEditId && captionEditId.startsWith(p.id + ':')) {
+                          const slot = String(captionEditId).slice(String(p.id).length + 1)
+                          commitCaption(p, slot)
+                        } else {
+                          setCaptionEditId(null)
+                        }
                       }
                       const plus = (side, title, onClick) => (
                         <button
@@ -4399,7 +4589,7 @@ export default function ComicEditor({
                           data-cap-slot={slot}
                           onDragStart={e => startCaptionDrag(e, 'bar', p, slot)}
                           onDragEnd={endCaptionDrag}
-                          onClick={e => { e.stopPropagation(); setCaptionEditId(`${p.id}:${slot}`) }}
+                          onClick={e => { e.stopPropagation(); captionCaretRef.current = computeCaptionCaretOffset(e, text, e.currentTarget, 'page-caption'); setCaptionEditId(`${p.id}:${slot}`) }}
                         >
                           <PageBin
                             title={`Delete the ${slot} caption on page ${p.page_number}`}
@@ -4432,7 +4622,7 @@ export default function ComicEditor({
                             className="caption-input"
                             style={capStyle}
                             rows={1}
-                            autoFocus
+                            ref={setArmedCaptionRef}
                             value={text ?? ''}
                             placeholder="Caption…"
                             aria-label={`${slot} caption for page ${p.page_number}`}
@@ -4466,7 +4656,7 @@ export default function ComicEditor({
                                     // know WHICH caption page is being edited.
                                     data-page-id={p.id}
                                     style={capStyle}
-                                    autoFocus
+                                    ref={setArmedCaptionRef}
                                     value={p.caption ?? ''}
                                     placeholder="Caption page…"
                                     aria-label={`Caption page ${p.page_number}`}
@@ -4529,7 +4719,7 @@ export default function ComicEditor({
                                 data-caption-drag="page"
                                 onDragStart={e => startCaptionDrag(e, 'page', p, 'page')}
                                 onDragEnd={endCaptionDrag}
-                                onClick={e => { e.stopPropagation(); setCaptionEditId(`${p.id}:page`) }}
+                                onClick={e => { e.stopPropagation(); captionCaretRef.current = computeCaptionCaretOffset(e, p.caption, e.currentTarget, 'caption-page-caption'); setCaptionEditId(`${p.id}:page`) }}
                               >
                                 <span className="caption-page-caption">{p.caption || 'Caption page'}</span>
                               </div>
@@ -4603,6 +4793,9 @@ export default function ComicEditor({
             <div className="modal-actions">
               <button className="btn--primary" onClick={modalUpdate}>Update</button>
               <button className="btn--danger" onClick={modalDiscard}>Discard</button>
+              {/* B18 round 5c, issue 2 — CANCEL: close with neither update nor
+                  discard (return to the previous state; stay in text mode). */}
+              <button className="btn--neutral" onClick={cancelTextModal}>Cancel</button>
             </div>
           </div>
         </div>
@@ -4622,6 +4815,9 @@ export default function ComicEditor({
             <div className="modal-actions">
               <button className="btn--primary" onClick={guardReview}>Review in text mode</button>
               <button className="btn--danger" onClick={guardDiscard}>Discard</button>
+              {/* B18 round 5c, issue 2 — CANCEL: close with the deferred edit
+                  dropped (neither reviewed nor discarded); stay in tiles. */}
+              <button className="btn--neutral" onClick={cancelGuard}>Cancel</button>
             </div>
           </div>
         </div>

@@ -181,10 +181,16 @@ body.section-resizing, body.section-resizing * { cursor: ns-resize; user-select:
    the surface regardless of the differing widths of the two sides. The text
    pane still flex-fills the section height (the section is a flex column),
    so the textarea grows with the window. */
-.editor-heading { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; margin: 16px 0 10px; }
-.editor-heading .heading-left { justify-self: start; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.editor-heading .heading-title { justify-self: center; margin: 0; font-size: 1.02rem; white-space: nowrap; text-align: center; }
-.editor-heading .heading-right { justify-self: end; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* B18 round 5c, issue 3 — the heading is now TWO lines: the comic NAME on its
+   own line (centered, full width), and the CONTROLS row below (Text Mode
+   toggle + unsaved badge on the left, Update/Auto/Copy on the right). Each
+   control group stays on a SINGLE line (no button wrapping in portrait); the
+   row itself may wrap between the two groups only on very narrow windows. */
+.editor-heading { display: flex; flex-direction: column; gap: 10px; margin: 16px 0 10px; }
+.editor-heading .heading-title { margin: 0; font-size: 1.02rem; white-space: normal; overflow-wrap: anywhere; text-align: center; }
+.editor-heading .heading-controls { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.editor-heading .heading-left { display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; }
+.editor-heading .heading-right { display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; }
 /* Issue 1 — the Text Mode toggle is a PILL (reusing .preview-toggle), always
    saying "Text Mode": greyed when off, highlighted when on. The base class
    only carries the cursor + the unsaved-animation hook (the pill look comes
